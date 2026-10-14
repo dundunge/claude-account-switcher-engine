@@ -16,8 +16,9 @@ const tray = require('./tray')
 
 const WIN = process.platform === 'win32'
 
-// Claude Desktop reads CLAUDE_USER_DATA_DIR at startup and calls
-// app.setPath('userData', ...) with it, so a profile directory *is* an account.
+// A profile directory *is* an account: point Claude Desktop's userData at one
+// and the signed-in account lives there. Which knob does the pointing has
+// changed with Claude's builds — platform.launchClaude carries the current answer.
 // There is no single-instance lock in the bundle, so profiles run side by side.
 //
 // appData is ~/Library/Application Support on a Mac and %APPDATA% on Windows,

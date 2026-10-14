@@ -219,7 +219,9 @@ async function launchClaude (dir, isDefault) {
 
   let child
   try {
-    child = spawn(exe, [], {
+    // The switch as well as the variable, for the reason mac.js gives: current
+    // Claude builds strip the variable at startup, and nothing strips a switch.
+    child = spawn(exe, isDefault ? [] : [`--user-data-dir=${dir}`], {
       env,
       detached: true,          // outlives CASE, which is the point of a launcher
       stdio: 'ignore',

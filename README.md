@@ -118,11 +118,15 @@ Mac. Each artifact comes from its own runner.
 
 ## How it works
 
-> Verified against **Claude Desktop 1.26832.0** on macOS 26. Everything below is
+> Verified against **Claude Desktop 1.34493.1** on macOS 26. Everything below is
 > internal detail of another app, observed on disk — it can change with any
 > Claude update. If something here stops matching, trust the app, not this file.
 
-Claude Desktop reads `CLAUDE_USER_DATA_DIR` at startup:
+An account is just a directory: point Claude Desktop's `userData` at one and the
+signed-in account, its cookies and its session list all live there. There are two
+ways to do the pointing, and the launcher uses both.
+
+`CLAUDE_USER_DATA_DIR` is the original one, read by Claude itself:
 
 ```js
 if (process.env.CLAUDE_USER_DATA_DIR) {
@@ -131,24 +135,61 @@ if (process.env.CLAUDE_USER_DATA_DIR) {
 }
 ```
 
-That is platform-independent code in a cross-platform app, which is why this
-works the same way on both. So an account is just a directory. On macOS the
-launcher runs:
+That is platform-independent code in a cross-platform app, which is why the
+launcher works the same way on both.
 
-```bash
-open -n -a Claude --env "CLAUDE_USER_DATA_DIR=$HOME/Library/Application Support/Claude-Work"
-```
-
-`-n` is what gets a second instance out of a bundle, and `--env` is the only way
-to hand a launched `.app` an environment. Windows needs neither — the variable
-goes straight into the child's environment block:
+**Claude 1.34493.1 stopped honouring it.** The packaged app now deletes the
+variable during startup unless a signed token vouches for it:
 
 ```js
-spawn('%LOCALAPPDATA%\\AnthropicClaude\\app-<version>\\claude.exe', [], {
-  env: { ...process.env, CLAUDE_USER_DATA_DIR: 'C:\\...\\Claude-Work' },
-  detached: true
-})
+const authorized = checkCdpAuth()
+app.isPackaged && !authorized && delete process.env.CLAUDE_USER_DATA_DIR
 ```
+
+`checkCdpAuth` wants `CLAUDE_CDP_AUTH` to carry an Ed25519 signature over
+`<timestamp>.<base64 userData path>`, minted within the last five minutes and
+verified against a public key baked into the bundle. That is Anthropic's own test
+harness, and it cannot be forged from outside. Without it the variable is gone
+before any path code reads it, and every account lands on the default profile.
+
+What survives is `--user-data-dir`, a Chromium switch Electron applies before any
+of the app's own code runs. It is not among the switches Claude refuses (that
+list is `remote-debugging-port`, `disable-web-security`,
+`ignore-certificate-errors` and similar — pass one of those and Claude exits
+instead of starting). So the launcher passes both. On macOS:
+
+```bash
+open -n -a Claude \
+  --env "CLAUDE_USER_DATA_DIR=$HOME/Library/Application Support/Claude-Work" \
+  --args --user-data-dir="$HOME/Library/Application Support/Claude-Work"
+```
+
+`-n` is what gets a second instance out of a bundle, `--env` is the only way to
+hand a launched `.app` an environment, and `--args` goes last because `open`
+hands everything after it to the app. Windows needs none of that — the variable
+goes into the child's environment block and the switch onto its command line:
+
+```js
+spawn('%LOCALAPPDATA%\\AnthropicClaude\\app-<version>\\claude.exe',
+  ['--user-data-dir=C:\\...\\Claude-Work'], {
+    env: { ...process.env, CLAUDE_USER_DATA_DIR: 'C:\\...\\Claude-Work' },
+    detached: true
+  })
+```
+
+The variable is kept because older builds honour it, and because when it survives
+Claude keeps `claude_desktop_config.json` inside the profile rather than a
+sibling directory. Existing profiles need no migration: the layout on disk is the
+same either way.
+
+Two things are lost under the switch, both because Claude compares its `userData`
+against the one canonical path and treats anything else as relocated:
+
+- **Claude in Chrome local pairing** is off for non-default accounts.
+- **Per-profile logs** are gone on macOS — every account writes to the shared
+  `~/Library/Logs/Claude/main.log`.
+
+Both are covered in their own sections below.
 
 Claude has no single-instance lock, so several accounts run at once.
 
@@ -271,6 +312,13 @@ and the `Profile N` directory naming — so only the root differs:
 Pick **Don't open Chrome** to unpair, or **New Chrome profile…** to have Chrome
 create a fresh one on first launch.
 
+> **Since Claude 1.34493.1** the extension cannot pair with a *non-default*
+> account. Claude disables local pairing whenever its `userData` is not the
+> canonical path, which is exactly what running a second account requires:
+> `local pairing disabled for this launch: userData relocated`. Opening the
+> account's Chrome profile still works — the extension simply will not link to
+> that Claude instance. The default account is unaffected.
+
 ### The extension cannot be installed silently
 
 Chrome will not let an app add an extension to a profile. The only silent route
@@ -328,6 +376,13 @@ Personal  10 index backups                     Show
 
 A mapping whose internal id is already indexed is skipped — one desktop session
 spans several transcripts as it compacts, and those earlier segments are not lost.
+
+> **Since Claude 1.34493.1** only the default account has a log of its own. Every
+> profile writes to the shared `~/Library/Logs/Claude/main.log`, and its lines
+> carry nothing that says which account produced them. Failure detection and lost
+> session recovery therefore report nothing for non-default accounts, rather than
+> risk calling another account's entire history lost. Index backups and the
+> writability check read the profile directly and are unaffected.
 
 Everything here is additive: it reads Claude's data, copies it, and creates
 missing entries. It never edits or deletes anything of Claude's.

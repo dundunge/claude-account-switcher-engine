@@ -48,7 +48,20 @@ const claudeHint = () => 'Claude is not installed in /Applications — accounts 
  */
 async function launchClaude (dir, isDefault) {
   const args = ['-n', '-a', 'Claude']
-  if (!isDefault) args.push('--env', `CLAUDE_USER_DATA_DIR=${dir}`)
+  if (!isDefault) {
+    // Both knobs, because neither is enough on its own. Claude 1.34493.1
+    // deletes CLAUDE_USER_DATA_DIR during startup unless a signed
+    // CLAUDE_CDP_AUTH token vouches for it, so on current builds the variable
+    // alone lands every account on the default profile. --user-data-dir is a
+    // Chromium switch Electron applies before any of the app's code runs, so
+    // nothing can strip it. The variable stays because older builds honour it,
+    // and because when it survives Claude keeps claude_desktop_config.json in
+    // the profile rather than a sibling directory.
+    //
+    // --args goes last: open hands everything after it to the application.
+    args.push('--env', `CLAUDE_USER_DATA_DIR=${dir}`)
+    args.push('--args', `--user-data-dir=${dir}`)
+  }
   const { ok } = await run('/usr/bin/open', args, 15000)
   return { ok }
 }

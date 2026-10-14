@@ -27,10 +27,11 @@ const os = require('node:os')
 const PROJECTS = path.join(os.homedir(), '.claude', 'projects')
 const KEEP_BACKUPS = 10
 
-// The profile Claude uses with no CLAUDE_USER_DATA_DIR set, and where Electron
-// leaves that profile's log. Paths rather than plumbing, so they live here
-// rather than in src/platform — which also keeps this module loadable under
-// plain `node --test`, with no Electron anywhere.
+// The profile Claude uses when nothing points it elsewhere, and the log Electron
+// gives the app — on macOS shared by every profile since Claude 1.34493.1.
+// Paths rather than plumbing, so they live here rather than in src/platform —
+// which also keeps this module loadable under plain `node --test`, with no
+// Electron anywhere.
 const WIN = process.platform === 'win32'
 const APPDATA = () => process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming')
 
@@ -199,11 +200,14 @@ const FAIL_RE = /^(\S+ \S+) \[error\] Failed to save session (local_[0-9a-f-]+):
  * what separates a genuinely lost session from an ordinary CLI transcript.
  */
 function readLog (profile) {
-  // Profiles launched with CLAUDE_USER_DATA_DIR get <profile>/Logs. Only the
-  // default profile falls back to the shared log, and only it may: for any other
-  // profile a missing log means the account has not been opened yet, and reading
-  // the shared one would report the default profile's sessions as this account's
-  // — every one of them missing from an index that does not exist yet.
+  // Profiles launched with CLAUDE_USER_DATA_DIR got a log of their own at
+  // <profile>/Logs. Claude 1.34493.1 drops that variable, so accounts started
+  // under --user-data-dir write to the shared log instead and this finds
+  // nothing for them. That silence is the right answer, not a gap: only the
+  // default profile may fall back to the shared log, because for any other one
+  // reading it would report every session in there as this account's, none of
+  // them in this account's index — the whole of someone else's history called
+  // lost.
   const own = path.join(profile, 'Logs', 'main.log')
   const file = !fs.existsSync(own) && profile === DEFAULT_PROFILE ? SHARED_LOG : own
   // readTail answers '' for a file that is not there, so an unopened account
