@@ -27,11 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use store::Account;
 use tauri::webview::PageLoadEvent;
 use tauri::{
-    AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
-};
-use tauri_plugin_dialog::{
-    DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
@@ -66,8 +62,6 @@ struct Runtime {
     /// another app owns stays in the settings but does nothing.
     hotkey: Option<String>,
     last_update: Option<update::Check>,
-    /// Banners the renderer shows need room the account count does not account for.
-    extra_height: f64,
     seen_issues: HashSet<String>,
     issue_count: usize,
     /// Launched at login, the point is to be ready for the hotkey, not to appear.
@@ -296,51 +290,24 @@ fn free_name(name: &str, accounts: &[Account]) -> String {
         .expect("a free name")
 }
 
-/// Decimal units, to match what Finder reports for the same folder.
-fn fmt_bytes(bytes: Option<u64>) -> String {
-    let Some(b) = bytes else {
-        return "an unknown amount".into();
-    };
-    let units = ["bytes", "KB", "MB", "GB", "TB"];
-    let (mut n, mut i) = (b as f64, 0);
-    while n >= 1000.0 && i < units.len() - 1 {
-        n /= 1000.0;
-        i += 1;
-    }
-    match i {
-        0 => format!("{b} bytes"),
-        _ if n < 10.0 => format!("{n:.1} {}", units[i]),
-        _ => format!("{n:.0} {}", units[i]),
-    }
+/// Tell both windows and the tray that the account list changed — the settings
+/// window restores archives, the launcher adds and removes, and each shows the
+/// other's work without being asked.
+fn changed(app: &AppHandle) {
+    tray::refresh(app);
+    let _ = app.emit("accounts:changed", ());
 }
 
-/// The two paths that cannot be undone get a native warning, not the page's own
-/// sheet. Must not be called on the main thread; commands never are.
-///
-/// Cancel goes first because the first button is the one Return presses, and
-/// only the delete button itself, by name, counts as a yes — closing the dialog
-/// any other way, Escape included, deletes nothing.
-fn confirm_delete(app: &AppHandle, message: &str, detail: &str) -> bool {
-    const DELETE: &str = "Delete Permanently";
-    let mut d = app
-        .dialog()
-        .message(detail)
-        .title(message)
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Cancel".into(),
-            DELETE.into(),
-        ));
-    if let Some(w) = main_window(app) {
-        d = d.parent(&w);
-    }
-    matches!(d.blocking_show_with_result(), MessageDialogResult::Custom(b) if b == DELETE)
+/// Deleting asks for the name typed back. Checked here as well as in the page,
+/// so nothing short of that — a stray click, a bug in the page — erases a profile.
+fn confirmed(typed: Option<&str>, name: &str) -> bool {
+    typed.is_some_and(|t| t.trim() == name)
 }
 
 // --------------------------------------------------------------- commands ---
 //
 // Sync functions marked async run on Tauri's thread pool rather than the main
-// thread, which is what keeps lsof, du and the dialogs off the UI.
+// thread, which is what keeps lsof and du off the UI.
 
 // Fast path: config only, no probing. The window must paint immediately.
 #[tauri::command(async)]
@@ -377,8 +344,7 @@ fn accounts_adopt(app: AppHandle, picked: Vec<Picked>) -> Vec<Value> {
         .map(|p| store::new_account(&p.name, p.dir))
         .collect();
     store::edit(|c| c.accounts = Some(accounts.clone()));
-    fit_window(&app);
-    tray::refresh(&app);
+    changed(&app);
     decorated(&accounts)
 }
 
@@ -403,22 +369,22 @@ fn accounts_add(app: AppHandle, name: String) -> Value {
     });
     match added {
         Ok(accounts) => {
-            fit_window(&app);
-            tray::refresh(&app);
+            changed(&app);
             json!({ "accounts": decorated(&accounts) })
         }
         Err(e) => error(e),
     }
 }
 
-// Name, emoji and colour move together, because they are edited together — the
-// edit sheet always sends all three.
+// Name, icon and colour move together, because they are edited together — the
+// account sheet always sends all of them.
 #[tauri::command(async)]
 fn accounts_update(
     app: AppHandle,
     id: String,
     name: String,
     emoji: String,
+    icon: String,
     hue: Option<f64>,
 ) -> Value {
     let name = name.trim().to_owned();
@@ -442,6 +408,12 @@ fn accounts_update(
         // code points, and there is no reason to refuse one the picker does not offer.
         let e: String = emoji.trim().chars().take(16).collect();
         a.emoji = (!e.is_empty()).then_some(e);
+        // One of the page's own line icons, by name. Anything else reads as none.
+        let i = icon.trim();
+        a.icon = (!i.is_empty()
+            && i.len() <= 24
+            && i.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
+        .then(|| i.to_owned());
         // None is "derive it from the name".
         a.hue = hue
             .filter(|h| h.is_finite())
@@ -450,7 +422,7 @@ fn accounts_update(
     });
     match updated {
         Ok(accounts) => {
-            tray::refresh(&app);
+            changed(&app);
             // Deliberately not probed: lsof would put two seconds between pressing
             // Save and seeing the new name. The renderer keeps the status it has.
             json!({ "accounts": stored_list(&accounts) })
@@ -460,7 +432,12 @@ fn accounts_update(
 }
 
 #[tauri::command(async)]
-fn accounts_remove(app: AppHandle, id: String, delete_data: bool) -> Value {
+fn accounts_remove(
+    app: AppHandle,
+    id: String,
+    delete_data: bool,
+    confirm: Option<String>,
+) -> Value {
     let Some(a) = find(&id) else {
         return error("Account not found.");
     };
@@ -473,19 +450,8 @@ fn accounts_remove(app: AppHandle, id: String, delete_data: bool) -> Value {
         if platform::is_running(&a.dir) {
             return error("That account is open. Quit it first, then try again.");
         }
-        let n = session_count(&a.dir);
-        let detail = format!(
-            "This erases the profile directory and everything in it, including {n} saved session{} and the signed-in account.\n\n\
-             Your ~/.claude data — skills, plugins, settings and transcripts — is not affected.\n\n{}",
-            if n == 1 { "" } else { "s" },
-            a.dir.display()
-        );
-        if !confirm_delete(
-            &app,
-            &format!("Delete “{}” and all of its data?", a.name),
-            &detail,
-        ) {
-            return json!({ "cancelled": true });
+        if !confirmed(confirm.as_deref(), &a.name) {
+            return error("Type the account’s name to confirm the deletion.");
         }
         if let Err(e) = std::fs::remove_dir_all(&a.dir).or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -501,8 +467,7 @@ fn accounts_remove(app: AppHandle, id: String, delete_data: bool) -> Value {
         c.accounts_mut().retain(|x| x.id != id);
         c.accounts().to_vec()
     });
-    fit_window(&app);
-    tray::refresh(&app);
+    changed(&app);
     json!({ "accounts": decorated(&next) })
 }
 
@@ -525,8 +490,8 @@ fn accounts_archive(app: AppHandle, id: String) -> Value {
     if platform::is_running(&a.dir) {
         return error("That account is open. Quit it first, then try again.");
     }
-    // No second confirmation: archiving deletes nothing and restores in a click,
-    // and the picker's own menu already spelled out what it does.
+    // No confirmation: archiving deletes nothing and restores in a click, and the
+    // remove sheet already spelled out what it does.
     let record = match archive::archive(&a, platform::profile_size(&a.dir)) {
         Ok(r) => r,
         Err(e) => return error(e),
@@ -540,8 +505,7 @@ fn accounts_archive(app: AppHandle, id: String) -> Value {
         c.archived.push(record);
         (c.accounts().to_vec(), c.archived.clone())
     });
-    fit_window(&app);
-    tray::refresh(&app);
+    changed(&app);
     // Unprobed for the same reason as the edit path; the renderer polls right after.
     json!({ "accounts": stored_list(&accounts), "archived": archive::with_status(&archived), "movedTo": moved_to })
 }
@@ -559,33 +523,23 @@ fn archive_restore(app: AppHandle, id: String) -> Value {
     let (accounts, archived) = store::edit(|c| {
         // A fresh id: the archived one may since have been reused by a new account.
         let mut a = store::new_account(&free_name(&r.name, c.accounts()), dir);
-        (a.emoji, a.hue, a.chrome) = (r.emoji.clone(), r.hue, r.chrome.clone());
+        (a.emoji, a.icon, a.hue, a.chrome) =
+            (r.emoji.clone(), r.icon.clone(), r.hue, r.chrome.clone());
         c.accounts_mut().push(a);
         c.archived.retain(|x| x.id != id);
         (c.accounts().to_vec(), c.archived.clone())
     });
-    fit_window(&app);
-    tray::refresh(&app);
+    changed(&app);
     json!({ "accounts": stored_list(&accounts), "archived": archive::with_status(&archived), "renamed": renamed })
 }
 
 #[tauri::command(async)]
-fn archive_delete(app: AppHandle, id: String) -> Value {
+fn archive_delete(app: AppHandle, id: String, confirm: Option<String>) -> Value {
     let Some(r) = store::load().archived.into_iter().find(|x| x.id == id) else {
         return error("That archive is no longer listed.");
     };
-    let detail = format!(
-        "This erases {} — the profile folder and everything in it, including its signed-in account. It cannot be undone.\n\n\
-         Your ~/.claude data — skills, plugins, settings and transcripts — is not affected.\n\n{}",
-        fmt_bytes(r.bytes),
-        r.dir.display()
-    );
-    if !confirm_delete(
-        &app,
-        &format!("Delete the archive of “{}”?", r.name),
-        &detail,
-    ) {
-        return json!({ "cancelled": true });
+    if !confirmed(confirm.as_deref(), &r.name) {
+        return error("Type the account’s name to confirm the deletion.");
     }
     if let Err(e) = archive::destroy(&r) {
         return error(e);
@@ -594,6 +548,7 @@ fn archive_delete(app: AppHandle, id: String) -> Value {
         c.archived.retain(|x| x.id != id);
         c.archived.clone()
     });
+    changed(&app);
     json!({ "archived": archive::with_status(&archived) })
 }
 
@@ -640,27 +595,28 @@ fn app_dismiss(app: AppHandle) {
     }
 }
 
-// A list modal needs more room than a two-account window has. Grow for it, then
-// fit_window() puts things back when the modal closes.
 #[tauri::command(async)]
-fn app_ensure_height(app: AppHandle, min: f64) {
-    if let Some(w) = main_window(&app) {
-        let (width, height) = logical_size(&w);
-        if height < min - CONTENT_OFFSET {
-            let _ = w.set_size(LogicalSize::new(width, min - CONTENT_OFFSET));
-        }
-    }
+fn app_show_health(app: AppHandle) {
+    reveal_health(&app);
+}
+
+/// The three places the About section links to. A name rather than a URL, so the
+/// page cannot ask for anything else to be opened.
+#[tauri::command(async)]
+fn app_open_link(which: String) {
+    let base = update::releases_page().replace("/releases/latest", "");
+    let url = match which.as_str() {
+        "source" => base,
+        "releases" => update::releases_page(),
+        "licence" => format!("{base}/blob/main/LICENSE"),
+        _ => return,
+    };
+    platform::open_url(&url);
 }
 
 #[tauri::command(async)]
-fn app_fit_window(app: AppHandle) {
-    fit_window(&app);
-}
-
-#[tauri::command(async)]
-fn app_extra_height(app: AppHandle, px: f64) {
-    rt().extra_height = px.max(0.0);
-    fit_window(&app);
+fn settings_open(app: AppHandle, section: Option<String>) {
+    open_settings(&app, section.as_deref());
 }
 
 // The reason travels with the answer: "not installed" and "installed, but from
@@ -676,6 +632,9 @@ fn settings_get() -> Value {
     let mut v = serde_json::to_value(store::settings()).unwrap_or_default();
     v["version"] = update::VERSION.into();
     v["openAtLogin"] = platform::open_at_login().into();
+    v["defaultHotkey"] = platform::DEFAULT_HOTKEY.into();
+    v["dataDir"] = json!(store::conf_dir());
+    v["backupsDir"] = json!(store::backup_root());
     v
 }
 
@@ -704,7 +663,7 @@ fn settings_set_presentation(app: AppHandle, menu_bar: bool, hide_dock: bool) ->
 #[tauri::command(async)]
 fn settings_set_sorting(app: AppHandle, sort_by_recent: bool) -> Value {
     store::edit(|c| c.settings.sort_by_recent = sort_by_recent);
-    tray::refresh(&app);
+    changed(&app);
     json!({ "sortByRecent": sort_by_recent })
 }
 
@@ -749,7 +708,12 @@ fn chrome_list(account_id: String) -> Value {
 }
 
 #[tauri::command(async)]
-fn chrome_pair(account_id: String, dir: Option<String>, open_on_launch: Option<bool>) -> Value {
+fn chrome_pair(
+    app: AppHandle,
+    account_id: String,
+    dir: Option<String>,
+    open_on_launch: Option<bool>,
+) -> Value {
     let paired = store::edit(|c| {
         let a = c.accounts_mut().iter_mut().find(|x| x.id == account_id)?;
         a.chrome = dir.filter(|d| !d.is_empty()).map(|dir| store::ChromePair {
@@ -759,7 +723,10 @@ fn chrome_pair(account_id: String, dir: Option<String>, open_on_launch: Option<b
         Some(c.accounts().to_vec())
     });
     match paired {
-        Some(accounts) => json!({ "accounts": decorated(&accounts) }),
+        Some(accounts) => {
+            changed(&app);
+            json!({ "accounts": stored_list(&accounts) })
+        }
         None => error("Account not found."),
     }
 }
@@ -842,11 +809,6 @@ fn update_install(app: AppHandle) -> Value {
         app2.exit(0);
     });
     json!({ "ok": true, "relaunching": true })
-}
-
-#[tauri::command(async)]
-fn update_page() {
-    platform::open_url(&update::releases_page());
 }
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -932,32 +894,39 @@ pub fn reveal_health(app: &AppHandle) {
     let _ = app.emit("health:show", ());
 }
 
-/// On Windows the page's own 52 px titlebar is hidden in favour of the native
-/// one, which sits outside the inner size the heights below describe.
-const CONTENT_OFFSET: f64 = if cfg!(windows) { 52.0 } else { 0.0 };
-
-/// Size the window to its content so it never opens as a half-empty panel.
-fn preferred_height() -> f64 {
-    let Some(stored) = store::accounts() else {
-        return 560.0 - CONTENT_OFFSET;
-    }; // setup carries its own copy
-    let chrome = 52.0 + 16.0 + 60.0; // titlebar + list padding + footer
-    (chrome + stored.len() as f64 * 66.0 + rt().extra_height).clamp(260.0, 760.0) - CONTENT_OFFSET
-}
-
-fn logical_size(w: &WebviewWindow) -> (f64, f64) {
-    let size = w
-        .inner_size()
-        .unwrap_or_default()
-        .to_logical::<f64>(w.scale_factor().unwrap_or(1.0));
-    (size.width, size.height)
-}
-
-/// Re-fit the window after the account count changes, so the list never scrolls.
-fn fit_window(app: &AppHandle) {
-    if let Some(w) = main_window(app) {
-        let _ = w.set_size(LogicalSize::new(logical_size(&w).0, preferred_height()));
+/// The settings window: one at a time, fronted if it is already open. Created on
+/// demand rather than kept hidden, since most launches never open it. Building a
+/// window waits on the main thread, so callers there hand this to a thread.
+pub fn open_settings(app: &AppHandle, section: Option<&str>) {
+    if let Some(w) = app.get_webview_window("settings") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        if let Some(s) = section {
+            let _ = app.emit_to("settings", "settings:section", s);
+        }
+        return;
     }
+    let start = serde_json::to_string(section.unwrap_or("general")).unwrap_or_default();
+    let builder =
+        WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
+            .title("CASE Settings")
+            .inner_size(760.0, 540.0)
+            .min_inner_size(640.0, 440.0)
+            .visible(false)
+            .initialization_script(format!("window.CASE_SECTION = {start};"))
+            .on_page_load(|w, p| {
+                if p.event() == PageLoadEvent::Finished {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            });
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(18.0, 20.0));
+    let _ = builder.build();
 }
 
 /// With a global hotkey, a menu bar or launch at login there is still a way back
@@ -971,8 +940,11 @@ fn keeps_running() -> bool {
 fn create_window(app: &AppHandle) -> tauri::Result<()> {
     let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         .title("CASE")
-        .inner_size(440.0, preferred_height())
-        .min_inner_size(380.0, 240.0 - CONTENT_OFFSET)
+        // A fixed size the page lays itself out in. It never resizes itself:
+        // a window that grows and shrinks under the pointer is the jank this
+        // layout exists to avoid.
+        .inner_size(440.0, 600.0)
+        .min_inner_size(380.0, 420.0)
         .visible(false)
         .on_page_load(|w, p| {
             if p.event() == PageLoadEvent::Finished && !std::mem::take(&mut rt().start_hidden) {
@@ -984,7 +956,7 @@ fn create_window(app: &AppHandle) -> tauri::Result<()> {
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(14.0, 18.0));
+        .traffic_light_position(tauri::LogicalPosition::new(16.0, 16.0));
     let win = builder.build()?;
 
     let app = app.clone();
@@ -1162,7 +1134,6 @@ fn main() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             accounts_list,
@@ -1180,10 +1151,10 @@ fn main() {
             accounts_quit,
             app_hide,
             app_dismiss,
-            app_ensure_height,
-            app_fit_window,
-            app_extra_height,
+            app_show_health,
+            app_open_link,
             app_claude_installed,
+            settings_open,
             settings_get,
             settings_set_hotkey,
             settings_set_presentation,
@@ -1201,7 +1172,6 @@ fn main() {
             health_reveal,
             update_check,
             update_install,
-            update_page,
         ])
         .setup(|app| {
             // The LaunchAgent and the Run key both start CASE with --hidden.
@@ -1255,11 +1225,14 @@ mod tests {
     }
 
     #[test]
-    fn sizes_read_as_finder_reads_them() {
-        assert_eq!(fmt_bytes(Some(999)), "999 bytes");
-        assert_eq!(fmt_bytes(Some(8_400_000_000)), "8.4 GB");
-        assert_eq!(fmt_bytes(Some(26_000)), "26 KB");
-        assert_eq!(fmt_bytes(None), "an unknown amount");
+    fn only_the_name_typed_back_confirms_a_deletion() {
+        assert!(confirmed(Some(" Work "), "Work"));
+        assert!(
+            !confirmed(Some("work"), "Work"),
+            "case matters: it is the name, read back"
+        );
+        assert!(!confirmed(Some(""), "Work"));
+        assert!(!confirmed(None, "Work"));
     }
 
     #[test]

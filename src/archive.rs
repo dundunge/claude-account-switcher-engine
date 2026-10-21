@@ -71,6 +71,7 @@ pub fn archive(account: &Account, bytes: Option<u64>) -> Result<Archived, String
         id: account.id.clone(),
         name: account.name.clone(),
         emoji: account.emoji.clone(),
+        icon: account.icon.clone(),
         hue: account.hue,
         chrome: account.chrome.clone(),
         dir: dest,

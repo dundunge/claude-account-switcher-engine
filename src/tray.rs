@@ -134,8 +134,10 @@ fn menu(
             None::<&str>,
         )?)?;
     }
-    for (id, label) in rows {
-        menu.append(&item(id, label)?)?;
+    // ⌘1–9 as in the launcher. Shown, and live while the menu is open.
+    for (i, (id, label)) in rows.iter().enumerate() {
+        let key = (i < 9).then(|| format!("CmdOrCtrl+{}", i + 1));
+        menu.append(&MenuItem::with_id(app, id, label, true, key)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     let health = if issues > 0 {
@@ -144,7 +146,15 @@ fn menu(
         "Session health".into()
     };
     menu.append(&item("health", &health)?)?;
-    menu.append(&item("settings", "Settings…")?)?;
+    menu.append(&item("new", "New account…")?)?;
+    menu.append(&MenuItem::with_id(
+        app,
+        "settings",
+        "Settings…",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&item("open", "Open CASE")?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
@@ -163,9 +173,14 @@ fn menu(
 pub fn on_menu(app: &AppHandle, id: &str) {
     match id {
         "health" => crate::reveal_health(app),
+        // Building a window waits on the main thread, which this handler is on.
         "settings" => {
+            let app = app.clone();
+            std::thread::spawn(move || crate::open_settings(&app, None));
+        }
+        "new" => {
             crate::open_window(app);
-            let _ = app.emit("settings:show", ());
+            let _ = app.emit("account:new", ());
         }
         "open" => crate::open_window(app),
         "quit" => app.exit(0),

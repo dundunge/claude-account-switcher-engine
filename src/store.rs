@@ -36,6 +36,12 @@ pub struct Account {
         deserialize_with = "lenient",
         skip_serializing_if = "Option::is_none"
     )]
+    pub icon: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub hue: Option<i64>,
     #[serde(
         default,
@@ -62,6 +68,12 @@ pub struct Archived {
         skip_serializing_if = "Option::is_none"
     )]
     pub emoji: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub icon: Option<String>,
     #[serde(
         default,
         deserialize_with = "lenient",
@@ -252,6 +264,7 @@ pub fn new_account(name: &str, dir: PathBuf) -> Account {
         name: name.into(),
         dir,
         emoji: None,
+        icon: None,
         hue: None,
         chrome: None,
         last_used_at: None,

@@ -49,7 +49,9 @@ fn every_command_the_page_invokes_is_registered_and_every_registered_one_is_invo
 #[test]
 fn every_event_the_page_listens_for_is_emitted_and_the_other_way_round() {
     let listened = all(r"on\('([\w:]+)'", &read("ui/api.js"));
-    let emitted = all(r#"emit\("([\w:]+)""#, &rust_sources());
+    let sources = rust_sources();
+    let mut emitted = all(r#"emit\("([\w:]+)""#, &sources);
+    emitted.extend(all(r#"emit_to\("[\w-]+",\s*"([\w:]+)""#, &sources));
     assert_eq!(listened, emitted);
 }
 
@@ -59,6 +61,9 @@ fn the_renderer_and_the_bridge_agree_on_its_methods() {
     let api = read("ui/api.js");
     let body = api.split("window.api = {").nth(1).unwrap();
     let exposed = all(r"(?m)^  (\w+):", body);
-    let used = all(r"window\.api\.(\w+)", &read("ui/renderer.js"));
+    let pages = ["ui/common.js", "ui/launcher.js", "ui/settings.js"]
+        .map(read)
+        .join("\n");
+    let used = all(r"\bapi\.(\w+)", &pages);
     assert_eq!(exposed, used);
 }

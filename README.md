@@ -7,45 +7,52 @@ machine — side by side, with your settings and skills shared between them.
 macOS and Windows. Written in Rust on [Tauri](https://tauri.app), so it is a
 few megabytes rather than a second copy of Chromium.
 
-Click the icon, pick an account, Claude opens signed in as that account.
+Summon it, type a few letters, press Return: Claude opens signed in as that
+account.
 
 ```
-┌────────────────────────────────────────┐
-│              CASE                      │
-│                                        │
-│   💼   Work                    ●   ⌘1  │
-│        Running · 29 sessions           │
-│        ▇▇▇▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│   PE   Personal                    ⌘2  │
-│        2h ago · 3 sessions · Chrome    │
-│        ▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▇▁▁▁▁▁▁▁▁▁▁▁▁▁ │
-│                                        │
-│   + Add account          ⚙   ⛨ Sessions│
-└────────────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│ ● ● ●                 ⛨ 1 to restore  ⚙ │
+│ ┌──────────────────────────────────────┐ │
+│ │ ⌕  Open an account…               ⌘K │ │
+│ └──────────────────────────────────────┘ │
+│ ▣  Work                     ◔ 82%    ↵  │
+│    Running · 29 sessions · Chrome · Work │
+│ ⌂  Personal                 ◔ 55%   ⌘2  │
+│    2 h ago · 3 sessions                  │
+│ CA Client · Acme            ◕ 93%   ⌘3  │
+│    Running · 11 sessions                 │
+├──────────────────────────────────────────┤
+│ + New account  ▤ 2 archived   ↵ Open  ⌘K │
+└──────────────────────────────────────────┘
 ```
 
-`●` marks an account that is already open. Hovering a card reveals edit, Chrome
-pairing, reveal-in-Finder, quit and remove.
+The launcher is one window of a fixed size, and keyboard first: type to filter,
+`↑`/`↓` to move, `Return` to open, `⌘1`–`⌘9` to open directly. A green dot on a
+badge marks an account that is already open. Everything else about an account
+is in its **⌘K** actions — edit, Chrome pairing, show in Finder, quit, archive,
+remove — or a right-click away.
 
-Each account can carry its own **icon and colour** — the pencil button opens an
-Edit sheet with the name, an emoji and a palette, previewed as you pick. Leave
-either on *Automatic* and you get initials over a colour hashed from the name.
-Accounts also remember when you last opened them; **Settings → Sort by most
-recently used** moves the last one you used to the top, taking `⌘1`–`⌘9` with
-it. That is off by default, because with two accounts the order would flip on
-every switch.
+Each account has its own **icon and colour**, set on its sheet (`⌘E`): a line
+icon or its initials, over a colour of your choosing or one derived from the
+name. Accounts remember when you last opened them; **Settings → General → Order**
+can put the most recent first, taking `⌘1`–`⌘9` with it. That is off by default,
+because with two accounts the order would flip on every switch.
 
-The trash button offers three things, not one: **remove from the list** (nothing
-on disk changes), **archive**, or **delete everything**. Archiving renames the
-profile folder aside — instant whatever its size, since nothing is copied — and
-a banner offers it back. Each option shows what it costs; profiles here run from
-0.5 to 8.4 GB, so the difference is worth seeing before you choose.
+**Remove…** offers three things, not one, each saying what it keeps and what it
+loses: **remove from the list** (nothing on disk changes), **archive**, or
+**delete everything**. Archiving renames the profile folder aside — instant
+whatever its size, since nothing is copied — and Settings → General gives it
+back. Deleting asks you to type the account's name, and says how much it frees.
 
-The bar along the bottom of a card is **plan usage** — whichever of the
-five-hour and weekly limits is further along, turning amber past 75% and red
-past 90%. Hover for both figures. Claude records this itself every five minutes
-in `plan-usage-history.json`; CASE only reads it, and says "as of" rather than
+The ring beside each account is **plan usage**: the five-hour limit outside, the
+weekly one inside, turning amber past 75% and red past 90%. Hover for both
+figures. Claude records this itself every five minutes in
+`plan-usage-history.json`; CASE only reads it, and says "as of" rather than
 pretending to be live.
+
+**Settings** (`⌘,`) is a window of its own, in sections: General, Shortcut,
+Menu bar & Dock, Updates, Sessions & data, About.
 
 ## Install
 
@@ -93,7 +100,7 @@ not want the shortcut: Windows will not show a notification from an app it canno
 match to a Start menu entry, so the session-health warnings depend on it.
 
 **Updates need none of that, on either platform.** CASE checks GitHub once a day,
-and installs from **Settings → Check now**. It downloads the release itself with
+and installs from **Settings → Updates**. It downloads the release itself with
 the system's `curl`, checks it against the published checksum, and swaps the app
 in place — and because both of those download marks are set by the *browser*, an
 update CASE fetched carries neither.
@@ -270,11 +277,12 @@ cd <the session's cwd> && claude --resume <sessionId>
 
 ## Everyday use
 
-- **Keyboard.** `↑`/`↓` moves, `Return` opens, `⌘1`–`⌘9` (`Ctrl+1`–`Ctrl+9` on
-  Windows) opens an account directly. Each card shows its own shortcut. `Esc`
-  closes the launcher.
-- **Quit one account.** Running accounts get a power button, which quits that one
-  and leaves the others running. Neither OS will tell you which "Claude" is which
+- **Keyboard.** Type to filter, `↑`/`↓` moves, `Return` opens, `⌘1`–`⌘9`
+  (`Ctrl+1`–`Ctrl+9` on Windows) opens an account directly, `⌘K` its actions,
+  `⌘N` a new one, `⌘,` Settings. `Esc` clears the filter, then closes the
+  launcher.
+- **Quit one account.** A running account's actions include **Quit this
+  account** (`⌥⌘Q`), which quits that one and leaves the others running. Neither OS will tell you which "Claude" is which
   — same binary, same name in Activity Monitor or Task Manager — so each finds
   out its own way. macOS runs `lsof` on the profile, which yields the pid holding
   it. Windows will not hand out another process's environment, so there is
@@ -286,23 +294,22 @@ cd <the session's cwd> && claude --resume <sessionId>
 - **Summon from anywhere.** `⌥⌘C` on macOS, `Alt+Shift+C` on Windows — not
   `Ctrl+Alt+C`, because on Polish and most European layouts AltGr *is* Ctrl+Alt
   and that would eat a character you type. Press it again to put the launcher
-  away. Rebind it in **Settings** (the gear) by clicking the shortcut and
-  pressing the combination you want — a combination another app already owns is
-  refused rather than silently ignored.
+  away. Rebind it in **Settings → Shortcut** by clicking the keys and pressing the
+  combination you want — a lone key is refused, and so is a combination another
+  app already owns, rather than silently ignored.
 - **Launch at login.** Off by default. When on, the launcher starts hidden and
   waits for the shortcut. It is a LaunchAgent on macOS
   (`~/Library/LaunchAgents/local.launcher.case.plist`) and a `Run` key value on
   Windows — both plain enough to check or remove by hand.
-- **Menu bar / notification area.** On by default: the account list lives there,
-  so switching never needs a window. Optionally hide the Dock icon (or the
-  taskbar button) and run from it alone — the pinned shortcut still launches the
-  app. That toggle is locked unless the menu bar is on, or there would be no way
-  back into the app.
-- **Keep it to hand.** If the launcher is not pinned, it offers to pin itself: to
-  the Dock on macOS, which only re-reads its preferences on restart, so this
-  restarts the Dock; to the Start menu on Windows, which has not let an app pin
-  itself to the taskbar since 8.1. On Windows that shortcut is also what makes
-  notifications work — see **Install**.
+- **Menu bar / notification area.** **Settings → Menu bar & Dock** is one choice
+  of three: menu bar and Dock (the default), menu bar only, or Dock only. There
+  is no fourth, because with neither there would be no way back into the app.
+  The menu holds the whole account list, so switching never needs a window.
+- **Keep it to hand.** The same section pins CASE: to the Dock on macOS, which
+  only re-reads its preferences on restart, so this restarts the Dock; to the
+  Start menu on Windows, which has not let an app pin itself to the taskbar since
+  8.1. On Windows that shortcut is also what makes notifications work — see
+  **Install**.
 
 ## Paired Chrome profiles
 
@@ -431,12 +438,14 @@ Copy-Item "$env:APPDATA\Claude\claude_desktop_config.json" `
   instead of opening a second: `lsof` on macOS, and on Windows an exclusive open
   of the profile's LevelDB `LOCK`, which fails with a sharing violation exactly
   when something holds it.
-- Deleting an account warns twice, reports how many sessions it destroys, refuses
+- Deleting an account asks for its name typed back — checked by the app as well
+  as the page — says how much it frees and how many sessions go with it, refuses
   while the account is open, and can never touch the default profile.
 - **Neither build is signed** by an identity the OS recognises, so a first
   download needs a manual step on both. See **Install**.
 - On macOS `lsof` is the slowest thing here, so the window paints from config
-  first and folds in running state a moment later.
+  first and folds in running state a moment later. The window never resizes
+  itself; banners became toasts that cover nothing.
 - **A profile's size is measured differently on each.** `du` counts allocated
   blocks, with APFS clones counted once; the Windows walk sums file lengths. The
   same profile can read a little larger there.
@@ -458,8 +467,11 @@ src/update.rs            GitHub releases, curl, checksum, swap
 src/tray.rs              menu-bar / notification-area mode
 src/platform/mac.rs      open(1), lsof, Dock pinning, LaunchAgent, ditto, swap.sh
 src/platform/win.rs      spawn + env, LOCK probing, taskkill, .lnk, Run key, tar, swap.ps1
-ui/api.js                the page's bridge to the commands
-ui/                      picker UI (no framework)
+ui/api.js                both windows' bridge to the commands
+ui/common.js             DOM building, icons, avatars, formatting, toasts
+ui/launcher.js           the launcher: list, ⌘K actions, account sheet, remove, health, first run
+ui/settings.js           the settings window
+ui/styles.css            one stylesheet, dark and light tokens (no framework, no build step)
 assets/                  the icon artwork, and the tray and badge images
 icons/                   bundle icons, from `cargo tauri icon assets/icon.png` —
                          except icon.ico, the full-bleed Windows set, kept as is
