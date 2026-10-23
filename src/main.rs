@@ -14,6 +14,7 @@ mod chrome;
 mod health;
 mod local_sync;
 mod locale;
+mod native_usage;
 mod platform;
 mod store;
 mod tray;
@@ -112,7 +113,7 @@ fn probe(accounts: &[Account]) -> Vec<Status> {
                     running: platform::is_running(&a.dir),
                     sessions: session_count(&a.dir),
                     exists: a.dir.exists(),
-                    usage: usage::read(&a.dir),
+                    usage: native_usage::read(&a.id, &a.dir),
                 })
             })
             .collect();
@@ -178,6 +179,19 @@ fn error(msg: impl Into<String>) -> Value {
 // library in %LOCALAPPDATA%\Claude-3p, which the prefix scan below would
 // otherwise offer up as an account called "3p".
 const NOT_A_PROFILE: &str = "Claude-3p";
+pub const MAX_ACCOUNTS: usize = 8;
+const DEFAULT_PROFILE_NAME: &str = "Claude";
+
+fn valid_profile_name(name: &str) -> bool {
+    name == DEFAULT_PROFILE_NAME || (name.starts_with("Claude-") && name.len() > "Claude-".len())
+}
+
+fn valid_profile_dir(parent: &Path, dir: &Path) -> bool {
+    dir.parent() == Some(parent)
+        && dir
+            .file_name()
+            .is_some_and(|n| valid_profile_name(&n.to_string_lossy()))
+}
 
 /// Profiles present on disk that the config does not know about yet.
 fn discover_profiles() -> Vec<Value> {
@@ -216,38 +230,58 @@ fn discover_profiles() -> Vec<Value> {
 
 /// Stamp an account as just used. Activating a running one counts.
 fn touch(id: &str) {
-    store::edit(|c| {
+    let _ = store::edit(|c| {
         if let Some(a) = c.accounts_mut().iter_mut().find(|a| a.id == id) {
             a.last_used_at = Some(now_ms());
         }
     });
 }
 
-fn launch_account(a: &Account) -> Value {
-    let Ok(_launch) = local_sync::LAUNCH_LOCK.try_lock() else {
+fn launch_account(app: &AppHandle, id: &str) -> Value {
+    let Ok(_launch) = store::OPERATION_LOCK.try_lock() else {
         return error(crate::locale::tr(
             "另一次账号切换正在进行，请稍后重试。",
             "Another account switch is in progress. Try again shortly.",
         ));
+    };
+    let Some(a) = find(id) else {
+        return error(crate::locale::tr("未找到账号。", "Account not found."));
+    };
+    let stage_app = app.clone();
+    let stage_id = id.to_owned();
+    let mut stage = |name: &str| {
+        let _ = stage_app.emit(
+            "account:launch-stage",
+            json!({ "id": stage_id, "stage": name }),
+        );
     };
     touch(&a.id);
     if platform::is_running(&a.dir) {
         // Two instances on one profile corrupt its LevelDB stores, so this fronts
         // the one already open rather than starting a second.
         platform::activate_profile(&a.dir);
-        open_paired_chrome(a);
+        open_paired_chrome(&a);
         return json!({ "ok": true, "alreadyRunning": true });
     }
-    let sync = match local_sync::before_launch(&a.dir) {
+    let sync = match local_sync::before_launch_with_stage(&a.dir, &mut stage) {
         Ok(outcome) => outcome,
-        Err(message) => return error(&message),
+        Err(message) => {
+            stage("error");
+            return error(&message);
+        }
     };
+    stage("launching");
     // Snapshot the session index before handing control to Claude. This is the
     // cheap insurance against the failure mode health.rs exists to catch.
-    let _ = health::backup_index(a, &store::backup_root());
+    let _ = health::backup_index(&a, &store::backup_root());
     let _ = std::fs::create_dir_all(&a.dir);
-    let launched = platform::launch_claude(&a.dir, is_default(a));
-    open_paired_chrome(a);
+    let launched = platform::launch_claude(&a.dir, is_default(&a));
+    open_paired_chrome(&a);
+    if launched.is_ok() {
+        stage("completed");
+    } else {
+        stage("error");
+    }
     json!({ "ok": launched.is_ok(), "error": launched.err().flatten(), "alreadyRunning": false,
             "syncBootstrap": sync.bootstrap })
 }
@@ -351,14 +385,42 @@ struct Picked {
 }
 
 #[tauri::command(async)]
-fn accounts_adopt(app: AppHandle, picked: Vec<Picked>) -> Vec<Value> {
+fn accounts_adopt(app: AppHandle, picked: Vec<Picked>) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
+    if picked.len() > MAX_ACCOUNTS {
+        return error(crate::l10n!(
+            "最多支持 {MAX_ACCOUNTS} 个账号，请先减少选择。",
+            "CASE supports at most {MAX_ACCOUNTS} accounts. Remove a selection first."
+        ));
+    }
+    let roots = [platform::app_data(), platform::profile_root()];
+    let mut seen_dirs = HashSet::new();
+    if picked.iter().any(|p| {
+        !seen_dirs.insert(p.dir.clone())
+            || !p.dir.is_dir()
+            || !roots.iter().any(|root| valid_profile_dir(root, &p.dir))
+    }) {
+        return error(crate::locale::tr(
+            "账号目录必须位于 Claude 目录下，并使用 Claude 或 Claude-* 名称。",
+            "Profile folders must be inside Claude's profile root and use the Claude or Claude-* name form.",
+        ));
+    }
     let accounts: Vec<Account> = picked
         .into_iter()
         .map(|p| store::new_account(&p.name, p.dir))
         .collect();
-    store::edit(|c| c.accounts = Some(accounts.clone()));
-    changed(&app);
-    decorated(&accounts)
+    match store::edit(|c| c.accounts = Some(accounts.clone())) {
+        Ok(()) => {
+            changed(&app);
+            json!({ "accounts": decorated(&accounts) })
+        }
+        Err(e) => error(e),
+    }
 }
 
 #[tauri::command(async)]
@@ -370,7 +432,27 @@ fn accounts_add(app: AppHandle, name: String) -> Value {
             "The account name cannot be empty.",
         ));
     }
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
+    let dir = unique_dir(&name);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return error(crate::l10n!(
+            "无法创建账号目录：{e}",
+            "Could not create the profile folder: {e}"
+        ));
+    }
+    let account = store::new_account(&name, dir.clone());
     let added = store::edit(|c| {
+        if c.accounts().len() >= MAX_ACCOUNTS {
+            return Err(crate::l10n!(
+                "最多支持 {MAX_ACCOUNTS} 个账号，请先归档或移除一个账号。",
+                "CASE supports at most {MAX_ACCOUNTS} accounts. Archive or remove one first."
+            ));
+        }
         if c.accounts()
             .iter()
             .any(|a| a.name.to_lowercase() == name.to_lowercase())
@@ -381,22 +463,22 @@ fn accounts_add(app: AppHandle, name: String) -> Value {
             )
             .to_owned());
         }
-        let dir = unique_dir(&name);
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            crate::l10n!(
-                "无法创建账号目录：{e}",
-                "Could not create the profile folder: {e}"
-            )
-        })?;
-        c.accounts_mut().push(store::new_account(&name, dir));
+        c.accounts_mut().push(account.clone());
         Ok(c.accounts().to_vec())
     });
     match added {
-        Ok(accounts) => {
+        Ok(Ok(accounts)) => {
             changed(&app);
             json!({ "accounts": decorated(&accounts) })
         }
-        Err(e) => error(e),
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            error(e)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            error(e)
+        }
     }
 }
 
@@ -418,6 +500,12 @@ fn accounts_update(
             "The account name cannot be empty.",
         ));
     }
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let updated = store::edit(|c| {
         if c.accounts()
             .iter()
@@ -451,12 +539,13 @@ fn accounts_update(
         Ok(c.accounts().to_vec())
     });
     match updated {
-        Ok(accounts) => {
+        Ok(Ok(accounts)) => {
             changed(&app);
             // Deliberately not probed: lsof would put two seconds between pressing
             // Save and seeing the new name. The renderer keeps the status it has.
             json!({ "accounts": stored_list(&accounts) })
         }
+        Ok(Err(e)) => error(e),
         Err(e) => error(e),
     }
 }
@@ -468,6 +557,12 @@ fn accounts_remove(
     delete_data: bool,
     confirm: Option<String>,
 ) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let Some(a) = find(&id) else {
         return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
@@ -490,23 +585,74 @@ fn accounts_remove(
                 "Type the account name to confirm deletion.",
             ));
         }
-        if let Err(e) = std::fs::remove_dir_all(&a.dir).or_else(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(e)
+    }
+    // Stage destructive deletion as an atomic rename first.  The list commit
+    // and the final remove can then both roll back to the original directory.
+    let staged = if delete_data {
+        let metadata = std::fs::symlink_metadata(&a.dir);
+        if metadata
+            .as_ref()
+            .is_ok_and(|m| m.file_type().is_symlink() || m.is_dir())
+        {
+            let temp = a.dir.with_file_name(format!(
+                ".case-delete-{}-{}",
+                a.id,
+                uuid::Uuid::new_v4().simple()
+            ));
+            if let Err(e) = std::fs::rename(&a.dir, &temp) {
+                return error(crate::l10n!(
+                    "无法暂存账号目录：{e}",
+                    "Could not stage the profile for deletion: {e}"
+                ));
             }
-        }) {
-            return error(crate::l10n!(
-                "无法删除账号目录：{e}",
-                "Could not delete the profile: {e}"
+            Some(temp)
+        } else if metadata.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            None
+        } else {
+            return error(crate::locale::tr(
+                "账号目录类型无效，未删除。",
+                "The profile path is not a directory, so it was not deleted.",
             ));
         }
-    }
-    let next = store::edit(|c| {
+    } else {
+        None
+    };
+    // Commit the list change. If saving fails, put the staged directory back.
+    let next = match store::edit(|c| {
         c.accounts_mut().retain(|x| x.id != id);
         c.accounts().to_vec()
-    });
+    }) {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            let rollback = staged.as_ref().map(|temp| std::fs::rename(temp, &a.dir));
+            return error(match rollback {
+                Some(Err(r)) => crate::l10n!(
+                    "配置保存失败且目录回滚失败：{e}；{r}",
+                    "Could not save the configuration, and restoring the profile also failed: {e}; {r}"
+                ),
+                _ => e,
+            });
+        }
+    };
+    if let Some(temp) = staged
+        && let Err(e) = std::fs::remove_dir_all(&temp)
+    {
+        let config_rollback = store::edit(|c| c.accounts_mut().push(a.clone()));
+        let path_rollback = std::fs::rename(&temp, &a.dir);
+        return error(match (config_rollback, path_rollback) {
+            (Err(r), _) => crate::l10n!(
+                "无法删除账号目录且列表回滚失败：{e}；{r}",
+                "Could not delete the profile, and restoring the account list also failed: {e}; {r}"
+            ),
+            (Ok(()), Err(r)) => crate::l10n!(
+                "无法删除账号目录且目录回滚失败：{e}；{r}",
+                "Could not delete the profile, and restoring its folder also failed: {e}; {r}"
+            ),
+            (Ok(()), Ok(())) => {
+                crate::l10n!("无法删除账号目录：{e}", "Could not delete the profile: {e}")
+            }
+        });
+    }
     changed(&app);
     json!({ "accounts": decorated(&next) })
 }
@@ -518,6 +664,12 @@ fn accounts_size(id: String) -> Value {
 
 #[tauri::command(async)]
 fn accounts_archive(app: AppHandle, id: String) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let Some(a) = find(&id) else {
         return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
@@ -528,6 +680,7 @@ fn accounts_archive(app: AppHandle, id: String) -> Value {
         ));
     }
     // Renaming a directory out from under a running app is how you corrupt one.
+    // Recheck after taking the operation lock so a launch cannot race this test.
     if platform::is_running(&a.dir) {
         return error(crate::locale::tr(
             "此账号正在运行，请先正常退出 Claude 再试。",
@@ -544,11 +697,24 @@ fn accounts_archive(app: AppHandle, id: String) -> Value {
         .dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned());
-    let (accounts, archived) = store::edit(|c| {
+    let (accounts, archived) = match store::edit(|c| {
         c.accounts_mut().retain(|x| x.id != id);
-        c.archived.push(record);
+        c.archived.push(record.clone());
         (c.accounts().to_vec(), c.archived.clone())
-    });
+    }) {
+        Ok(value) => value,
+        Err(e) => {
+            let rollback = std::fs::rename(&record.dir, &record.original_dir);
+            return error(if let Err(r) = rollback {
+                crate::l10n!(
+                    "配置保存失败且目录回滚失败：{e}；{r}",
+                    "Could not save the configuration, and moving the profile back also failed: {e}; {r}"
+                )
+            } else {
+                e
+            });
+        }
+    };
     changed(&app);
     // Unprobed for the same reason as the edit path; the renderer polls right after.
     json!({ "accounts": stored_list(&accounts), "archived": archive::with_status(&archived), "movedTo": moved_to })
@@ -556,6 +722,12 @@ fn accounts_archive(app: AppHandle, id: String) -> Value {
 
 #[tauri::command(async)]
 fn archive_restore(app: AppHandle, id: String) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let Some(r) = store::load().archived.into_iter().find(|x| x.id == id) else {
         return error(crate::locale::tr(
             "此归档已不在列表中。",
@@ -567,21 +739,40 @@ fn archive_restore(app: AppHandle, id: String) -> Value {
         Err(e) => return error(e),
     };
     let renamed = (dir != r.original_dir).then(|| dir.clone());
-    let (accounts, archived) = store::edit(|c| {
+    let (accounts, archived) = match store::edit(|c| {
         // A fresh id: the archived one may since have been reused by a new account.
-        let mut a = store::new_account(&free_name(&r.name, c.accounts()), dir);
+        let mut a = store::new_account(&free_name(&r.name, c.accounts()), dir.clone());
         (a.emoji, a.icon, a.hue, a.chrome) =
             (r.emoji.clone(), r.icon.clone(), r.hue, r.chrome.clone());
         c.accounts_mut().push(a);
         c.archived.retain(|x| x.id != id);
         (c.accounts().to_vec(), c.archived.clone())
-    });
+    }) {
+        Ok(value) => value,
+        Err(e) => {
+            let rollback = std::fs::rename(&dir, &r.dir);
+            return error(if let Err(r_error) = rollback {
+                crate::l10n!(
+                    "配置保存失败且归档回滚失败：{e}；{r_error}",
+                    "Could not save the configuration, and moving the profile back to the archive also failed: {e}; {r_error}"
+                )
+            } else {
+                e
+            });
+        }
+    };
     changed(&app);
     json!({ "accounts": stored_list(&accounts), "archived": archive::with_status(&archived), "renamed": renamed })
 }
 
 #[tauri::command(async)]
 fn archive_delete(app: AppHandle, id: String, confirm: Option<String>) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let Some(r) = store::load().archived.into_iter().find(|x| x.id == id) else {
         return error(crate::locale::tr(
             "此归档已不在列表中。",
@@ -594,23 +785,70 @@ fn archive_delete(app: AppHandle, id: String, confirm: Option<String>) -> Value 
             "Type the account name to confirm deletion.",
         ));
     }
-    if let Err(e) = archive::destroy(&r) {
-        return error(e);
-    }
-    let archived = store::edit(|c| {
+    let staged = match std::fs::symlink_metadata(&r.dir) {
+        Ok(_) => {
+            let temp = r.dir.with_file_name(format!(
+                ".case-delete-archive-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            if let Err(e) = std::fs::rename(&r.dir, &temp) {
+                return error(crate::l10n!(
+                    "无法暂存归档：{e}",
+                    "Could not stage the archive for deletion: {e}"
+                ));
+            }
+            Some(temp)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return error(crate::l10n!(
+                "无法读取归档目录：{e}",
+                "Could not read the archive folder: {e}"
+            ));
+        }
+    };
+    let archived = match store::edit(|c| {
         c.archived.retain(|x| x.id != id);
         c.archived.clone()
-    });
+    }) {
+        Ok(archived) => archived,
+        Err(e) => {
+            let rollback = staged.as_ref().map(|temp| std::fs::rename(temp, &r.dir));
+            return error(match rollback {
+                Some(Err(r_error)) => crate::l10n!(
+                    "配置保存失败且归档回滚失败：{e}；{r_error}",
+                    "Could not save the configuration, and restoring the archive also failed: {e}; {r_error}"
+                ),
+                _ => e,
+            });
+        }
+    };
+    if let Some(temp) = staged {
+        let mut doomed = r.clone();
+        doomed.dir = temp.clone();
+        if let Err(e) = archive::destroy(&doomed) {
+            let config_rollback = store::edit(|c| c.archived.push(r.clone()));
+            let path_rollback = std::fs::rename(&temp, &r.dir);
+            return error(match (config_rollback, path_rollback) {
+                (Err(r_error), _) => crate::l10n!(
+                    "无法删除归档且列表回滚失败：{e}；{r_error}",
+                    "Could not delete the archive, and restoring the archive list also failed: {e}; {r_error}"
+                ),
+                (Ok(()), Err(r_error)) => crate::l10n!(
+                    "无法删除归档且目录回滚失败：{e}；{r_error}",
+                    "Could not delete the archive, and restoring its folder also failed: {e}; {r_error}"
+                ),
+                (Ok(()), Ok(())) => e,
+            });
+        }
+    }
     changed(&app);
     json!({ "archived": archive::with_status(&archived) })
 }
 
 #[tauri::command(async)]
-fn accounts_launch(id: String) -> Value {
-    match find(&id) {
-        Some(a) => launch_account(&a),
-        None => error(crate::locale::tr("未找到账号。", "Account not found.")),
-    }
+fn accounts_launch(app: AppHandle, id: String) -> Value {
+    launch_account(&app, &id)
 }
 
 #[tauri::command(async)]
@@ -663,6 +901,9 @@ fn app_open_link(which: String) {
         "releases" => update::releases_page(),
         "licence" => format!("{base}/blob/main/LICENSE"),
         "upstream" => "https://github.com/pstarostka/claude-account-switcher-engine".into(),
+        "accessibility" => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into()
+        }
         _ => return,
     };
     platform::open_url(&url);
@@ -701,7 +942,9 @@ fn settings_set_language(app: AppHandle, language: String) -> Value {
             "Unsupported interface language.",
         ));
     }
-    store::edit(|c| c.settings.language = language.clone());
+    if let Err(e) = store::edit(|c| c.settings.language = language.clone()) {
+        return error(e);
+    }
     if store::settings().language != language {
         return error(locale::tr(
             "无法保存语言设置。",
@@ -722,17 +965,19 @@ fn settings_set_language(app: AppHandle, language: String) -> Value {
 }
 
 #[tauri::command(async)]
-fn usage_refresh(id: String, official: bool) -> Value {
+fn usage_refresh(id: String, native: bool) -> Value {
     let Some(account) = find(&id) else {
         return error(locale::tr("未找到账号。", "Account not found."));
     };
-    if !official {
+    if !native {
         usage::invalidate(&account.dir);
-        return json!({ "ok": true, "usage": usage::read(&account.dir), "localOnly": true });
+        return json!({ "ok": true, "usage": native_usage::read(&account.id, &account.dir), "localOnly": true });
     }
-    match usage::refresh(&account.dir) {
+    match native_usage::capture(&account) {
         Ok(value) => json!({ "ok": true, "usage": value }),
-        Err(code) => json!({ "ok": false, "code": code, "usage": usage::read(&account.dir) }),
+        Err(code) => {
+            json!({ "ok": false, "code": code, "usage": native_usage::read(&account.id, &account.dir) })
+        }
     }
 }
 
@@ -742,10 +987,12 @@ fn settings_set_hotkey(app: AppHandle, hotkey: String, enabled: bool) -> Value {
         apply_hotkey_from_settings(&app); // keep whatever was working before
         return error(e);
     }
-    store::edit(|c| {
+    if let Err(e) = store::edit(|c| {
         c.settings.hotkey = hotkey;
         c.settings.hotkey_enabled = enabled;
-    });
+    }) {
+        return error(e);
+    }
     json!({ "ok": true })
 }
 
@@ -753,14 +1000,20 @@ fn settings_set_hotkey(app: AppHandle, hotkey: String, enabled: bool) -> Value {
 fn settings_set_presentation(app: AppHandle, menu_bar: bool, hide_dock: bool) -> Value {
     // No menu bar means the Dock icon has to stay, or the app becomes unreachable.
     let hide_dock = menu_bar && hide_dock;
-    store::edit(|c| (c.settings.menu_bar, c.settings.hide_dock) = (menu_bar, hide_dock));
+    if let Err(e) =
+        store::edit(|c| (c.settings.menu_bar, c.settings.hide_dock) = (menu_bar, hide_dock))
+    {
+        return error(e);
+    }
     apply_presentation(&app);
     json!({ "menuBar": menu_bar, "hideDock": hide_dock })
 }
 
 #[tauri::command(async)]
 fn settings_set_sorting(app: AppHandle, sort_by_recent: bool) -> Value {
-    store::edit(|c| c.settings.sort_by_recent = sort_by_recent);
+    if let Err(e) = store::edit(|c| c.settings.sort_by_recent = sort_by_recent) {
+        return error(e);
+    }
     changed(&app);
     json!({ "sortByRecent": sort_by_recent })
 }
@@ -773,7 +1026,9 @@ fn settings_set_login_item(enabled: bool) -> Value {
 
 #[tauri::command(async)]
 fn settings_set_auto_update(enabled: bool) -> Value {
-    store::edit(|c| c.settings.auto_update_check = enabled);
+    if let Err(e) = store::edit(|c| c.settings.auto_update_check = enabled) {
+        return error(e);
+    }
     json!({ "autoUpdateCheck": enabled })
 }
 
@@ -812,6 +1067,12 @@ fn chrome_pair(
     dir: Option<String>,
     open_on_launch: Option<bool>,
 ) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let paired = store::edit(|c| {
         let a = c.accounts_mut().iter_mut().find(|x| x.id == account_id)?;
         a.chrome = dir.filter(|d| !d.is_empty()).map(|dir| store::ChromePair {
@@ -821,11 +1082,12 @@ fn chrome_pair(
         Some(c.accounts().to_vec())
     });
     match paired {
-        Some(accounts) => {
+        Ok(Some(accounts)) => {
             changed(&app);
             json!({ "accounts": stored_list(&accounts) })
         }
-        None => error(crate::locale::tr("未找到账号。", "Account not found.")),
+        Ok(None) => error(crate::locale::tr("未找到账号。", "Account not found.")),
+        Err(e) => error(e),
     }
 }
 
@@ -850,11 +1112,17 @@ fn health_scan() -> health::Scan {
 
 #[tauri::command(async)]
 fn health_rebuild(account_id: String, orphan: health::Orphan) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
     let Some(a) = find(&account_id) else {
         return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
-    match health::rebuild(&a, &orphan) {
-        Ok(file) => json!({ "ok": true, "file": file }),
+    match local_sync::rebuild_session(&a, &orphan) {
+        Ok(result) => json!({ "ok": true, "result": result }),
         Err(e) => error(e),
     }
 }
@@ -873,7 +1141,7 @@ fn update_check() -> Value {
     let res = update::check();
     rt().last_update = Some(res.clone());
     if res.available {
-        store::edit(|c| c.settings.last_update_check = now_ms());
+        let _ = store::edit(|c| c.settings.last_update_check = now_ms());
     }
     merged_check(&res)
 }
@@ -934,7 +1202,7 @@ fn update_tick(app: &AppHandle) {
     if !res.ok {
         return;
     }
-    store::edit(|c| c.settings.last_update_check = now_ms());
+    let _ = store::edit(|c| c.settings.last_update_check = now_ms());
     if res.available {
         let _ = app.emit("update:available", &res);
     }

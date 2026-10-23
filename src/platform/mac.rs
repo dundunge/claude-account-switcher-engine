@@ -106,48 +106,45 @@ fn probe_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn lsof_probes(files: &[PathBuf], pids: bool) -> Output {
+    let mut args: Vec<OsString> = Vec::with_capacity(files.len() + 2);
+    if pids {
+        args.push("-t".into());
+    }
+    args.push("--".into());
+    args.extend(files.iter().map(|file| file.as_os_str().into()));
+    run("/usr/sbin/lsof", &args, secs(4))
+}
+
 /// macOS hides process environments, so there is no way to ask a running Claude
 /// which profile it uses. The profile's own open files are the reliable signal.
 pub fn is_running(dir: &Path) -> bool {
     let probes = probe_files(dir);
-    // In parallel: lsof is the slowest thing this app does.
-    std::thread::scope(|s| {
-        let probes: Vec<_> = probes
-            .iter()
-            .map(|f| {
-                s.spawn(move || {
-                    run("/usr/sbin/lsof", &[OsString::from("--"), f.into()], secs(3)).ok
-                })
-            })
-            .collect();
-        probes.into_iter().any(|h| h.join().unwrap_or(false))
-    })
+    // One lsof invocation covers all three profile probes.  The old parallel
+    // fan-out launched three processes for every account status refresh.
+    !probes.is_empty() && lsof_probes(&probes, false).ok
 }
 
 /// The Claude process holding a given profile directory. Helper processes turn up
 /// too, so the list is filtered down to the main binary; ending that takes its
 /// helpers with it.
-fn pids_for_profile(dir: &Path) -> Vec<String> {
-    let mut found: Vec<String> = Vec::new();
-    for f in probe_files(dir) {
-        let Output { ok, out } = run(
-            "/usr/sbin/lsof",
-            &[OsString::from("-t"), "--".into(), f.into()],
-            secs(4),
-        );
-        if !ok {
-            continue;
-        }
-        for pid in out
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.parse::<u32>().is_ok())
-        {
-            if !found.iter().any(|p| p == pid) {
-                found.push(pid.to_owned());
-            }
-        }
+pub(crate) fn pids_for_profile(dir: &Path) -> Vec<String> {
+    let probes = probe_files(dir);
+    if probes.is_empty() {
+        return vec![];
     }
+    let Output { ok, out } = lsof_probes(&probes, true);
+    if !ok {
+        return vec![];
+    }
+    let found: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.parse::<u32>().is_ok())
+        .map(str::to_owned)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     if found.is_empty() {
         return found;
     }

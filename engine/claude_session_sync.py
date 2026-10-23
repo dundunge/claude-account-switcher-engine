@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import dataclasses
 import fcntl
 import hashlib
@@ -40,6 +41,60 @@ SPAWN_PORTABLE = frozenset({
 SPAWN_FLAGS = frozenset({"sideSession", "userFork", "handOff", "btw"})
 MAX_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 10000
+
+# ``link(temp, destination); unlink(temp)`` is not a transaction: a process
+# exit between the two syscalls leaves a destination with two hard links.  The
+# next read quite correctly rejects that inode, which used to strand the
+# recovery journal.  macOS and Linux both expose an atomic no-replace rename;
+# use it when available and keep a conservative create-new fallback for other
+# platforms.
+AT_FDCWD = -2
+RENAME_EXCL_MACOS = 0x00000004
+RENAME_NOREPLACE_LINUX = 1
+
+
+def _rename_noreplace(source, destination):
+    source_b, destination_b = os.fsencode(source), os.fsencode(destination)
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
+        fn = libc.renameatx_np
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint]
+        fn.restype = ctypes.c_int
+        if fn(AT_FDCWD, source_b, AT_FDCWD, destination_b, RENAME_EXCL_MACOS) == 0:
+            return
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+    if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        fn = libc.renameat2
+        fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint]
+        fn.restype = ctypes.c_int
+        if fn(AT_FDCWD, source_b, AT_FDCWD, destination_b, RENAME_NOREPLACE_LINUX) == 0:
+            return
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+    # Platforms without a no-replace rename still get overwrite protection. A
+    # direct create-new is deliberately used instead of the old hard-link pair;
+    # the file is fully fsynced before this function is called.  macOS, the
+    # supported apply platform, always takes the atomic branch above.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(destination_b, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as out, open(source, "rb") as inp:
+            fd = -1
+            while True:
+                chunk = inp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    os.unlink(source)
 
 
 class SyncError(Exception):
@@ -258,22 +313,37 @@ def check_inputs(c, expected):
         raise SyncError("CONCURRENT_CHANGE")
 
 
-def transcript_available(c, sid):
+def transcript_index(c):
+    """Index transcript file metadata once for the whole reconciliation.
+
+    The old per-record lookup walked every project directory for every session.
+    A profile with a few thousand sessions therefore repeated the same directory
+    scans thousands of times.  Keep only the filename identity and the safety
+    result; transcript bytes remain outside the sync engine.
+    """
     safe_chain(c.projects_root)
+    result = {}
     for directory in c.projects_root.iterdir():
         if directory.is_symlink():
             raise SyncError("SYMLINK_REFUSED")
         if not directory.is_dir():
             continue
-        p = directory / (sid + ".jsonl")
-        safe_chain(p)
-        try:
-            s = p.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISREG(s.st_mode) and s.st_nlink == 1:
-            return True
-    return False
+        for p in directory.iterdir():
+            if p.suffix != ".jsonl" or not re.fullmatch(UUID, p.stem):
+                continue
+            safe_chain(p)
+            try:
+                s = p.lstat()
+            except FileNotFoundError:
+                continue
+            safe = stat.S_ISREG(s.st_mode) and s.st_nlink == 1
+            result[p.stem] = result.get(p.stem, False) or safe
+    return result
+
+
+def transcript_available(c, sid):
+    """Compatibility helper for callers that inspect one transcript."""
+    return transcript_index(c).get(sid, False)
 
 
 def record(c, name, f):
@@ -443,8 +513,16 @@ class Plan:
                 "hierarchy_orphans": self.hierarchy_orphans}
 
 
-def build_plan(c):
-    inputs = scan(c)
+def build_plan(c, seed=None):
+    actual = scan(c)
+    inputs = dict(actual)
+    if seed is not None:
+        relative, seeded = seed
+        if relative in inputs:
+            raise SyncError("SESSION_INDEX_ALREADY_EXISTS")
+        c.path(relative)
+        inputs[relative] = seeded
+    transcripts = transcript_index(c)
     records, tombstones = {}, {}
     for relative, f in inputs.items():
         name = Path(relative).name
@@ -481,7 +559,7 @@ def build_plan(c):
             for peer in c.peers:
                 output.pop(peer + "/" + name, None)
             continue
-        if not transcript_available(c, d["cliSessionId"]):
+        if not transcripts.get(d["cliSessionId"], False):
             raise SyncError("TRANSCRIPT_MISSING")
         stale_markers.update(n for n, _ in markers)
         portable = {k: v for k, v in d.items() if k in PORTABLE}
@@ -525,15 +603,17 @@ def build_plan(c):
 
     hierarchy_links, hierarchy_orphans = hierarchy_graph(c, output)
     ops = []
-    for rel in sorted(set(inputs) | set(output)):
-        before, after = inputs.get(rel), output.get(rel)
+    for rel in sorted(set(actual) | set(output)):
+        # A repair seed participates in reconciliation as virtual input, but it
+        # is absent on disk and therefore must still produce an add operation.
+        before, after = actual.get(rel), output.get(rel)
         if before == after:
             continue
         name = Path(rel).name
         kind = "remove" if after is None else "tombstone" if DELETED.fullmatch(name) else "archive" if name == "archived-sessions.idx" else "add" if before is None else "update"
         ops.append(Op(rel, before, after, kind))
-    check_inputs(c, inputs)
-    return Plan(inputs, ops, len(records), hierarchy_links, hierarchy_repairs, hierarchy_orphans)
+    check_inputs(c, actual)
+    return Plan(actual, ops, len(records), hierarchy_links, hierarchy_repairs, hierarchy_orphans)
 
 
 def assert_stopped():
@@ -572,8 +652,10 @@ def atomic_write(path, f, creating=False):
             os.fsync(out.fileno())
         if creating:
             # Atomic create without replacing a file created by somebody else.
-            os.link(temp, str(path), follow_symlinks=False)
-            os.unlink(temp)
+            # In particular, do not use link+unlink here: a crash in that
+            # two-step sequence creates a hard-linked destination that the
+            # reader must reject and the recovery journal can no longer scan.
+            _rename_noreplace(temp, str(path))
         else:
             os.replace(temp, str(path))
         fsync_dir(path.parent)
@@ -677,6 +759,41 @@ def apply(c, plan, guard=assert_stopped):
         return {"status": "completed", "snapshot": sid, **plan.summary()}
 
 
+def rebuild(c, relative, entry, guard=assert_stopped):
+    """Seed one missing record and let the normal transaction propagate it."""
+    if not isinstance(entry, dict):
+        raise SyncError("INVALID_REBUILD_ENTRY")
+    name = Path(relative).name
+    if not LOCAL.fullmatch(name):
+        raise SyncError("INVALID_REBUILD_PATH")
+    session_id = entry.get("sessionId")
+    cli_session_id = entry.get("cliSessionId")
+    identities = {
+        session_id,
+        session_id[6:] if isinstance(session_id, str) and session_id.startswith("local_") else None,
+        cli_session_id,
+    }
+    for peer in c.peers:
+        directory = c.peer_path(peer)
+        for marker in directory.iterdir():
+            match = DELETED.fullmatch(marker.name)
+            if not match or match.group(1) not in identities:
+                continue
+            value = read_file(marker)
+            if value is not None and type(parse(value.data)) is int and parse(value.data) > 0:
+                raise SyncError("SESSION_MARKED_DELETED")
+    data = encoded(entry)
+    mtime = entry.get("lastActivityAt")
+    if type(mtime) is not int or mtime <= 0:
+        mtime = time.time_ns()
+    # Health timestamps are milliseconds; regular index mtimes are nanoseconds.
+    stamp = mtime * 1_000_000 if mtime < 10**15 else mtime
+    plan = build_plan(c, (relative, File(data, stamp, 0o600)))
+    if not plan.operations:
+        raise SyncError("SESSION_MARKED_DELETED")
+    return apply(c, plan, guard=guard)
+
+
 def restore_plan(c, sid):
     if not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", sid):
         raise SyncError("INVALID_SNAPSHOT_ID")
@@ -686,6 +803,15 @@ def restore_plan(c, sid):
         raise SyncError("SNAPSHOT_NOT_FOUND")
     m = parse(f.data)
     if not isinstance(m, dict) or not isinstance(m.get("operations"), list):
+        raise SyncError("INVALID_MANIFEST")
+    if m.get("state") not in (
+        "prepared",
+        "applying",
+        "interrupted",
+        "restoring",
+        "restore_interrupted",
+        "completed",
+    ):
         raise SyncError("INVALID_MANIFEST")
     if any(m.get(key) != value for key, value in c.scope().items()):
         raise SyncError("SNAPSHOT_SCOPE_MISMATCH")
@@ -735,23 +861,34 @@ def restore(c, sid, guard=assert_stopped):
         current = dict(plan.inputs)
         manifest["state"] = "restoring"
         state_write(path, manifest)
-        for op in plan.operations:
+        try:
+            for op in plan.operations:
+                guard()
+                target = c.path(op.relative)
+                if read_file(target) != op.before:
+                    raise SyncError("CONCURRENT_CHANGE", sid)
+                if op.after is None:
+                    target.unlink()
+                    fsync_dir(target.parent)
+                    current.pop(op.relative, None)
+                else:
+                    atomic_write(target, op.after, creating=op.before is None)
+                    current[op.relative] = op.after
             guard()
-            target = c.path(op.relative)
-            if read_file(target) != op.before:
-                raise SyncError("CONCURRENT_CHANGE", sid)
-            if op.after is None:
-                target.unlink()
-                fsync_dir(target.parent)
-                current.pop(op.relative, None)
-            else:
-                atomic_write(target, op.after, creating=op.before is None)
-                current[op.relative] = op.after
-        guard()
-        check_inputs(c, current)
-        manifest["state"] = "rolled_back"
-        state_write(path, manifest)
-        return {"status": "rolled_back", "snapshot": sid, **plan.summary()}
+            check_inputs(c, current)
+            manifest["state"] = "rolled_back"
+            state_write(path, manifest)
+            return {"status": "rolled_back", "snapshot": sid, **plan.summary()}
+        except Exception as error:
+            manifest["state"] = "restore_interrupted"
+            try:
+                state_write(path, manifest)
+            except OSError:
+                pass
+            raise SyncError(
+                error.code if isinstance(error, SyncError) else "RESTORE_INTERRUPTED",
+                sid,
+            ) from None
 
 
 def main(argv=None):

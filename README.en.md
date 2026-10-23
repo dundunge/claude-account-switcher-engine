@@ -13,16 +13,23 @@ use `dundunge/claude-account-switcher-engine` exclusively; upstream is never mer
 - Chinese / English selection in Settings → General, applied to both windows and native menus,
   remembered after restart. Account names and other user data are never translated.
 - A usage page with separate five-hour and weekly **used** percentages, observation time and source.
-- Local refresh re-reads samples already recorded by Claude. It does not ask Claude to record a new one.
-- Optional official queries use the existing session and one fixed Claude usage endpoint, with no model messages.
-  Keychain authorization may be requested on macOS. There is a 60-second cooldown per profile.
-  HTTP failures, rate limits and browser verification are shown honestly, retaining the previous reading.
-  Missing limits are unknown. **The current live query encountered browser verification; successful live refresh
-  has not been verified.** View Settings → Usage in Claude when direct queries are unavailable.
+- Read from Claude observes the open account's official Claude Code quota panel, saving used percentages,
+  observation time and the original reset notices. Sign in once per account in Claude. CASE performs no extra
+  OAuth login and reads no cookies or Keychain credentials. Allow CASE in macOS System Settings → Privacy &
+  Security → Accessibility on first use.
+- Update usage records reads panels for open accounts and saved records for closed accounts, without switching.
+  Reading may briefly open the quota popover and close it afterwards; a popover already open stays open.
+  Observation time is not a server update timestamp. Reset notices retain their wording at observation time;
+  CASE does not turn them into an inferred live countdown.
+- Read saved records reads Claude's `plan-usage-history.json` and CASE's last panel observation. These can be old.
+  Closed accounts show their last reading and time; missing limits are unknown.
 - An offline local index sync engine, preserving parent and child relationships. Claude retains ownership of transcripts.
+- Switching shows waiting, validation, sync and launch stages; an interruption keeps its snapshot identifier for recovery.
 
 No reverse proxy, Claude bundle modification, cloud chat migration or quota reset.
 Local index sharing cannot transfer another account's model context cache. Use local handoff files for long tasks.
+
+See [docs/NATIVE-USAGE.md](docs/NATIVE-USAGE.md) for implementation and limitations. CodexBar is not required.
 
 ## Build and update
 
@@ -47,7 +54,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 python3 -m unittest discover -s tests/python -q
-node --test tests/i18n.test.cjs
+node --test tests/*.test.cjs
 ```
 
 ## Local sync setup

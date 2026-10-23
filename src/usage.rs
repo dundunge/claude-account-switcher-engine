@@ -15,10 +15,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 #[cfg(test)]
 const FIVE_HOURS: i64 = 5 * 60 * 60 * 1000;
@@ -32,6 +32,12 @@ struct Sample {
     sd: Option<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProfileIdentity {
+    pub(crate) account: String,
+    pub(crate) organization: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
@@ -43,12 +49,16 @@ pub struct Usage {
     pub source: String,
     pub fh_reset_at: Option<i64>,
     pub sd_reset_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fh_reset_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sd_reset_text: Option<String>,
 }
 
 // The file is ~280 KB and is rewritten every five minutes, but the status poll
 // runs every 2.5 seconds. Keyed on mtime and size so the parse happens at
 // Claude's rate.
-type Cached = (Option<SystemTime>, u64, Option<Sample>);
+type Cached = (Option<SystemTime>, u64, String, String, Option<Sample>);
 static CACHE: Mutex<Option<HashMap<PathBuf, Cached>>> = Mutex::new(None);
 
 fn pct(v: &Value) -> Option<u8> {
@@ -57,12 +67,99 @@ fn pct(v: &Value) -> Option<u8> {
         .map(|n| n.round().clamp(0.0, 100.0) as u8)
 }
 
-/// The most recent sample in the file, whichever org it belongs to.
-fn newest(file: &Path) -> Option<Sample> {
+fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(value) = map.get(*key).and_then(Value::as_str)
+                    && !value.is_empty()
+                {
+                    return Some(value.to_owned());
+                }
+            }
+            map.values().find_map(|value| find_string(value, keys))
+        }
+        Value::Array(values) => values.iter().find_map(|value| find_string(value, keys)),
+        _ => None,
+    }
+}
+
+/// Resolve the profile, account and organization that a local observation can
+/// be trusted to describe.  A missing or ambiguous organization is unknown;
+/// showing another organization's percentage is worse than showing no value.
+pub(crate) fn identity(profile: &Path) -> Option<ProfileIdentity> {
+    // Check the profile itself and the files we read.  Some normal macOS
+    // paths (notably /var -> /private/var) contain a symlinked parent; that
+    // must not make every temporary or system profile unreadable.  A symlink
+    // at the profile/config boundary is still rejected so usage cannot be
+    // silently read from a different account tree.
+    if std::fs::symlink_metadata(profile)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        return None;
+    }
+    let config_file = profile.join("config.json");
+    let metadata = std::fs::symlink_metadata(&config_file).ok()?;
+    if metadata.file_type().is_symlink() {
+        return None;
+    }
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return None;
+    }
+    let config: Value = serde_json::from_slice(&std::fs::read(config_file).ok()?).ok()?;
+    let account = find_string(
+        &config,
+        &["lastKnownAccountUuid", "accountUuid", "account_uuid"],
+    )?;
+    let organization = find_string(
+        &config,
+        &[
+            "lastKnownOrganizationUuid",
+            "organizationUuid",
+            "organization_uuid",
+        ],
+    )
+    .or_else(|| {
+        let root = profile.join("claude-code-sessions").join(&account);
+        let mut names = std::fs::read_dir(root)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|t| t.is_dir())
+                    .map(|_| entry.file_name())
+            })
+            .filter_map(|name| name.into_string().ok())
+            .filter(|name| uuid::Uuid::parse_str(name).is_ok())
+            .collect::<Vec<_>>();
+        names.sort();
+        (names.len() == 1).then(|| names.remove(0))
+    })?;
+    Some(ProfileIdentity {
+        account,
+        organization,
+    })
+}
+
+/// The most recent sample for the current organization. Samples from another
+/// organization, and legacy samples without an organization, remain unknown.
+fn newest(file: &Path, organization: &str) -> Option<Sample> {
     let raw: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
     let mut last: Option<(f64, &Value)> = None;
+    if !matches!(raw["version"].as_u64(), Some(1 | 2)) {
+        return None;
+    }
     for s in raw["samples"].as_array()? {
+        if s["org"].as_str() != Some(organization) {
+            continue;
+        }
         if let Some(t) = s["t"].as_f64()
+            && t.is_finite()
+            && t > 0.0
+            && t <= crate::now_ms() as f64
             && last.is_none_or(|(lt, _)| t > lt)
         {
             last = Some((t, s));
@@ -70,8 +167,16 @@ fn newest(file: &Path) -> Option<Sample> {
     }
     last.map(|(t, s)| Sample {
         at: t as i64,
-        fh: pct(&s["u"]["fh"]),
-        sd: pct(&s["u"]["sd"]),
+        fh: pct(if raw["version"] == 1 && s.get("u").is_none() {
+            &s["fh"]
+        } else {
+            &s["u"]["fh"]
+        }),
+        sd: pct(if raw["version"] == 1 && s.get("u").is_none() {
+            &s["sd"]
+        } else {
+            &s["u"]["sd"]
+        }),
     })
 }
 
@@ -87,35 +192,37 @@ fn as_of_now(s: Sample) -> Usage {
         source: "local".into(),
         fh_reset_at: None,
         sd_reset_at: None,
+        fh_reset_text: None,
+        sd_reset_text: None,
     }
 }
 
 /// Latest usage for a profile, or None if Claude has never recorded any.
 fn read_local(dir: &Path) -> Option<Usage> {
+    let identity = identity(dir)?;
     let file = dir.join("plan-usage-history.json");
-    let st = std::fs::metadata(&file).ok()?;
+    let st = std::fs::symlink_metadata(&file).ok()?;
+    if st.file_type().is_symlink() {
+        return None;
+    }
     let key = (st.modified().ok(), st.len());
 
     let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     let cache = cache.get_or_insert_default();
-    if let Some((m, n, v)) = cache.get(dir)
+    if let Some((m, n, account, org, v)) = cache.get(dir)
         && (*m, *n) == key
+        && account == &identity.account
+        && org == &identity.organization
     {
         return v.map(as_of_now);
     }
-    let value = newest(&file);
-    cache.insert(dir.to_path_buf(), (key.0, key.1, value));
+    let value = newest(&file, &identity.organization);
+    cache.insert(
+        dir.to_path_buf(),
+        (key.0, key.1, identity.account, identity.organization, value),
+    );
     value.map(as_of_now)
 }
-
-#[derive(Default)]
-struct LiveState {
-    values: HashMap<PathBuf, Usage>,
-    attempts: HashMap<PathBuf, Instant>,
-    in_flight: HashSet<PathBuf>,
-}
-
-static LIVE: Mutex<Option<LiveState>> = Mutex::new(None);
 
 pub fn invalidate(dir: &Path) {
     if let Some(cache) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -124,17 +231,10 @@ pub fn invalidate(dir: &Path) {
 }
 
 pub fn read(dir: &Path) -> Option<Usage> {
-    let local = read_local(dir);
-    let live = LIVE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .and_then(|s| s.values.get(dir))
-        .cloned();
-    newest_reading(local, live)
+    read_local(dir)
 }
 
-fn newest_reading(local: Option<Usage>, live: Option<Usage>) -> Option<Usage> {
+pub fn newest_reading(local: Option<Usage>, live: Option<Usage>) -> Option<Usage> {
     let mut picked = match (local, live) {
         (Some(a), Some(b)) => Some(if a.at > b.at { a } else { b }),
         (a, b) => a.or(b),
@@ -145,91 +245,6 @@ fn newest_reading(local: Option<Usage>, live: Option<Usage>) -> Option<Usage> {
     picked
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn parse_live(value: Value) -> Result<Usage, String> {
-    if value["ok"] != true {
-        let code = value["code"].as_str().unwrap_or("INVALID_RESPONSE");
-        return Err(
-            if code.len() <= 48
-                && code
-                    .bytes()
-                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
-            {
-                code.into()
-            } else {
-                "INVALID_RESPONSE".into()
-            },
-        );
-    }
-    let mut usage: Usage =
-        serde_json::from_value(value["usage"].clone()).map_err(|_| "INVALID_RESPONSE")?;
-    if usage.source != "official"
-        || (usage.fh.is_none() && usage.sd.is_none())
-        || usage.fh.is_some_and(|v| v > 100)
-        || usage.sd.is_some_and(|v| v > 100)
-        || crate::now_ms().abs_diff(usage.at) > 120_000
-    {
-        return Err("INVALID_RESPONSE".into());
-    }
-    usage.age = (crate::now_ms() - usage.at).max(0);
-    Ok(usage)
-}
-
-pub fn refresh(dir: &Path) -> Result<Usage, String> {
-    refresh_with(dir, || query_official(dir))
-}
-
-fn refresh_with(
-    dir: &Path,
-    query: impl FnOnce() -> Result<Usage, String>,
-) -> Result<Usage, String> {
-    {
-        let mut state = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-        let state = state.get_or_insert_default();
-        if state.in_flight.contains(dir) {
-            return Err("REFRESH_IN_PROGRESS".into());
-        }
-        if state
-            .attempts
-            .get(dir)
-            .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
-        {
-            return Err("REFRESH_COOLDOWN".into());
-        }
-        state.attempts.insert(dir.into(), Instant::now());
-        state.in_flight.insert(dir.into());
-    }
-    let result = query();
-    let mut state = LIVE.lock().unwrap_or_else(|e| e.into_inner());
-    let state = state.get_or_insert_default();
-    state.in_flight.remove(dir);
-    if let Ok(value) = &result {
-        state.values.insert(dir.into(), value.clone());
-    }
-    result
-}
-
-#[cfg(target_os = "macos")]
-fn query_official(dir: &Path) -> Result<Usage, String> {
-    let args: Vec<std::ffi::OsString> = vec![
-        "-I".into(),
-        "-c".into(),
-        include_str!("../support/usage_refresh.py").into(),
-        "--profile".into(),
-        dir.as_os_str().into(),
-    ];
-    let output = crate::platform::run("/usr/bin/python3", &args, Duration::from_secs(32));
-    if !output.ok {
-        return Err("HELPER_FAILED".into());
-    }
-    parse_live(serde_json::from_str(&output.out).map_err(|_| "INVALID_RESPONSE")?)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn query_official(_dir: &Path) -> Result<Usage, String> {
-    Err("PLATFORM_UNSUPPORTED".into())
-}
-
 #[cfg(test)]
 mod tests {
     //! The non-obvious part is not reading the file, it is what a sample still
@@ -238,15 +253,17 @@ mod tests {
     use super::*;
     use crate::now_ms;
 
-    fn official(at: i64) -> Usage {
+    fn panel(at: i64) -> Usage {
         Usage {
             at,
             age: 0,
             fh: Some(72),
             sd: None,
-            source: "official".into(),
+            source: "claude-ui".into(),
             fh_reset_at: None,
             sd_reset_at: None,
+            fh_reset_text: None,
+            sd_reset_text: None,
         }
     }
 
@@ -260,63 +277,8 @@ mod tests {
     }
 
     #[test]
-    fn an_official_failure_keeps_the_last_successful_reading() {
-        let dir = profile(serde_json::json!([]));
-        let value = official(now_ms());
-        LIVE.lock()
-            .unwrap()
-            .get_or_insert_default()
-            .values
-            .insert(dir.clone(), value.clone());
-        assert_eq!(
-            refresh_with(&dir, || Err("HTTP_403".into())),
-            Err("HTTP_403".into())
-        );
-        assert_eq!(read(&dir).unwrap().fh, value.fh);
-    }
-
-    #[test]
-    fn cooldown_and_inflight_guards_are_isolated_by_profile() {
-        let a = profile(serde_json::json!([]));
-        let b = profile(serde_json::json!([]));
-        let value = official(now_ms());
-        assert!(refresh_with(&a, || Ok(value.clone())).is_ok());
-        assert_eq!(
-            refresh_with(&a, || panic!("cooldown must not query")),
-            Err("REFRESH_COOLDOWN".into())
-        );
-        assert!(refresh_with(&b, || Ok(value.clone())).is_ok());
-        let c = profile(serde_json::json!([]));
-        LIVE.lock()
-            .unwrap()
-            .get_or_insert_default()
-            .in_flight
-            .insert(c.clone());
-        assert_eq!(
-            refresh_with(&c, || panic!("inflight must not query")),
-            Err("REFRESH_IN_PROGRESS".into())
-        );
-    }
-
-    #[test]
-    fn live_responses_reject_stale_data_invalid_numbers_and_unsanitized_errors() {
-        let valid = serde_json::json!({"ok":true, "usage": official(now_ms())});
-        assert!(parse_live(valid.clone()).is_ok());
-        let mut bad = valid.clone();
-        bad["usage"]["at"] = i64::MIN.into();
-        assert!(parse_live(bad).is_err());
-        let mut bad = valid;
-        bad["usage"]["fh"] = 101.into();
-        assert!(parse_live(bad).is_err());
-        assert_eq!(
-            parse_live(serde_json::json!({"ok":false, "code":"secret:private"})),
-            Err("INVALID_RESPONSE".into())
-        );
-    }
-
-    #[test]
     fn the_latest_observation_wins_across_sources() {
-        let live = official(now_ms());
+        let live = panel(now_ms());
         let local = Usage {
             at: live.at - 1,
             source: "local".into(),
@@ -326,7 +288,7 @@ mod tests {
             newest_reading(Some(local), Some(live.clone()))
                 .unwrap()
                 .source,
-            "official"
+            "claude-ui"
         );
         let local = Usage {
             at: live.at + 1,
@@ -343,6 +305,21 @@ mod tests {
     fn profile(samples: Value) -> PathBuf {
         let dir = crate::platform::temp_dir("case-usage-").unwrap();
         std::fs::write(
+            dir.join("config.json"),
+            r#"{"lastKnownAccountUuid":"account-a","lastKnownOrganizationUuid":"o"}"#,
+        )
+        .unwrap();
+        let mut samples = samples;
+        if let Some(rows) = samples.as_array_mut() {
+            for row in rows {
+                if let Some(object) = row.as_object_mut() {
+                    object
+                        .entry("org")
+                        .or_insert_with(|| Value::String("o".into()));
+                }
+            }
+        }
+        std::fs::write(
             dir.join("plan-usage-history.json"),
             serde_json::json!({ "version": 1, "samples": samples }).to_string(),
         )
@@ -357,6 +334,45 @@ mod tests {
         ))
         .unwrap();
         assert_eq!((u.fh, u.sd), (Some(42), Some(7)));
+    }
+
+    #[test]
+    fn accepts_both_native_history_versions_and_ignores_future_observations() {
+        let dir = profile(serde_json::json!([]));
+        let file = dir.join("plan-usage-history.json");
+        let now = now_ms();
+        for (version, sample) in [
+            (1, serde_json::json!({"t":now,"org":"o","fh":12,"sd":34})),
+            (
+                2,
+                serde_json::json!({"t":now,"org":"o","u":{"fh":12,"sd":34,"so":90}}),
+            ),
+        ] {
+            std::fs::write(
+                &file,
+                serde_json::json!({"version":version,"samples":[sample,
+                {"t":now+600_000,"u":{"fh":0,"sd":0}}]})
+                .to_string(),
+            )
+            .unwrap();
+            invalidate(&dir);
+            let value = read(&dir).unwrap();
+            assert_eq!((value.fh, value.sd), (Some(12), Some(34)));
+            assert_eq!(value.at, now);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_sample_from_another_organization_is_not_selected() {
+        let u = read(&profile(serde_json::json!([
+            { "t": now_ms() - 1_000, "org": "other", "u": { "fh": 98, "sd": 98 } },
+            { "t": now_ms() - 2_000, "org": "o", "u": { "fh": 12, "sd": 34 } }
+        ])));
+        assert_eq!(
+            (u.as_ref().and_then(|v| v.fh), u.as_ref().and_then(|v| v.sd)),
+            (Some(12), Some(34))
+        );
     }
 
     #[test]

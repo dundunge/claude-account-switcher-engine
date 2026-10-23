@@ -1,15 +1,50 @@
 //! Local installation hook; all account data stays in official Claude profiles.
 use serde_json::Value;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
-
-pub static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Default)]
 pub struct Outcome {
     pub bootstrap: bool,
+}
+
+fn read_stdout(child: &mut std::process::Child) -> Result<Vec<u8>, String> {
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        crate::locale::tr("同步没有返回结果", "The sync process returned no output").to_owned()
+    })?;
+    let mut output = Vec::new();
+    stdout.read_to_end(&mut output).map_err(|_| {
+        crate::locale::tr("无法读取同步结果", "Could not read the sync result").to_owned()
+    })?;
+    Ok(output)
+}
+
+fn stage_reader(child: &mut std::process::Child) -> Receiver<String> {
+    let (sender, receiver) = mpsc::channel();
+    let Some(stderr) = child.stderr.take() else {
+        return receiver;
+    };
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if let Some(stage) = line.strip_prefix("CASE_STAGE ") {
+                let _ = sender.send(stage.to_owned());
+            }
+        }
+    });
+    receiver
+}
+
+fn drain_stages<F: FnMut(&str)>(receiver: &Receiver<String>, on_stage: &mut F) {
+    while let Ok(stage) = receiver.try_recv() {
+        on_stage(&stage);
+    }
+}
+
+fn discard_stages(receiver: &Receiver<String>) {
+    while receiver.try_recv().is_ok() {}
 }
 
 fn checked_file(path: &Path) -> Result<(), String> {
@@ -66,12 +101,141 @@ fn config_path() -> Result<PathBuf, String> {
         .join("Library/Application Support/ClaudeSessionSync/CASE/hook.json"))
 }
 
-pub fn before_launch(target: &Path) -> Result<Outcome, String> {
+/// As `before_launch`, with progress callbacks for the launcher UI.  The
+/// callback runs on the sync polling thread and never touches Claude itself.
+pub fn before_launch_with_stage<F: FnMut(&str)>(
+    target: &Path,
+    mut on_stage: F,
+) -> Result<Outcome, String> {
     let config = config_path()?;
-    before_launch_with_config(target, &config)
+    before_launch_with_config_stage(target, &config, &mut on_stage)
 }
 
+/// Run a health repair through the same Python engine transaction used before a
+/// launch.  The caller already holds the shared CASE operation lock and must not
+/// ask Claude to quit on the user's behalf; the engine's stopped-process guard
+/// remains authoritative.
+pub fn rebuild_session(
+    account: &crate::store::Account,
+    orphan: &crate::health::Orphan,
+) -> Result<Value, String> {
+    let config = config_path()?;
+    checked_file(&config)?;
+    let value: Value = serde_json::from_slice(&std::fs::read(&config).map_err(|_| {
+        crate::locale::tr("无法读取同步配置", "Could not read the sync configuration.")
+    })?)
+    .map_err(|_| crate::locale::tr("同步配置无效", "Invalid sync configuration."))?;
+    if value.get("hook_enabled") != Some(&Value::Bool(true)) {
+        return Err(crate::locale::tr(
+            "同步配置未启用，无法通过同步引擎恢复会话。",
+            "Sync is not enabled, so the session cannot be repaired through the sync engine.",
+        )
+        .into());
+    }
+    let file = |key: &str| -> Result<PathBuf, String> {
+        let path = value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or(crate::locale::tr(
+                "同步配置缺少文件路径",
+                "A file path is missing from the sync configuration.",
+            ))?;
+        checked_file(&path)?;
+        Ok(path)
+    };
+    let python = file("python_path")?;
+    let bridge = file("bridge_path")?;
+    let mut child = Command::new(python)
+        .arg(bridge)
+        .args(["--config"])
+        .arg(&config)
+        .arg("--target")
+        .arg(&account.dir)
+        .arg("--repair")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("CASE_PROGRESS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| crate::locale::tr("无法启动本地同步", "Could not start local sync"))?;
+    if let Some(mut input) = child.stdin.take() {
+        let data = serde_json::to_vec(orphan)
+            .map_err(|_| crate::locale::tr("恢复数据无效", "The repair data is invalid."))?;
+        input
+            .write_all(&data)
+            .map_err(|_| crate::locale::tr("无法发送恢复数据", "Could not send repair data."))?;
+    }
+    let stages = stage_reader(&mut child);
+    let started = Instant::now();
+    loop {
+        // Repair has no visible stage consumer today, but drain the side
+        // channel so the helper cannot block on a full stderr pipe.
+        discard_stages(&stages);
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                discard_stages(&stages);
+                let output = read_stdout(&mut child)?;
+                let result: Value = serde_json::from_slice(&output).map_err(|_| {
+                    crate::locale::tr(
+                        "同步结果无效；请检查同步状态后重试",
+                        "Invalid sync result. Review the sync state before trying again.",
+                    )
+                })?;
+                if status.success() {
+                    return Ok(result);
+                }
+                let code = result
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("SYNC_FAILED");
+                let detail = match code {
+                    "CLAUDE_MUST_BE_FULLY_CLOSED" => crate::locale::tr(
+                        "Claude 仍在运行。请正常退出后再恢复会话。",
+                        "Claude is still running. Quit normally before repairing the session.",
+                    ),
+                    "SESSION_MARKED_DELETED" => crate::locale::tr(
+                        "该会话已有主动删除标记，未恢复。",
+                        "This session has an explicit deletion marker and was not rebuilt.",
+                    ),
+                    "RECOVERY_REQUIRED" => crate::locale::tr(
+                        "存在未完成的同步，需要先按快照恢复。",
+                        "An unfinished sync requires recovery from its snapshot first.",
+                    ),
+                    _ => crate::locale::tr(
+                        "会话恢复未通过，请检查同步状态。",
+                        "Session repair was blocked. Review the sync state.",
+                    ),
+                };
+                return Err(format!("{detail}\n{code}"));
+            }
+            Ok(None) if started.elapsed() < Duration::from_secs(75) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(crate::locale::tr(
+                    "同步超时，未恢复会话；请检查同步状态。",
+                    "Sync timed out. The session was not repaired; review the sync state.",
+                )
+                .into());
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
 fn before_launch_with_config(target: &Path, config: &Path) -> Result<Outcome, String> {
+    before_launch_with_config_stage(target, config, &mut |_| {})
+}
+
+fn before_launch_with_config_stage<F: FnMut(&str)>(
+    target: &Path,
+    config: &Path,
+    on_stage: &mut F,
+) -> Result<Outcome, String> {
     checked_file(config)?;
     let value: Value = serde_json::from_slice(&std::fs::read(config).map_err(|_| {
         crate::locale::tr("无法读取同步配置", "Could not read the sync configuration.")
@@ -108,9 +272,10 @@ fn before_launch_with_config(target: &Path, config: &Path) -> Result<Outcome, St
         .arg("--target")
         .arg(target)
         .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env("CASE_PROGRESS", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| {
             crate::locale::tr(
@@ -118,14 +283,15 @@ fn before_launch_with_config(target: &Path, config: &Path) -> Result<Outcome, St
                 "Could not start local sync. Account launch stopped.",
             )
         })?;
+    let stages = stage_reader(&mut child);
     let start = Instant::now();
     loop {
+        drain_stages(&stages, on_stage);
         match child.try_wait() {
             Ok(Some(status)) => {
-                let output = child.wait_with_output().map_err(|_| {
-                    crate::locale::tr("无法读取同步结果", "Could not read the sync result.")
-                })?;
-                let result: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+                drain_stages(&stages, on_stage);
+                let output = read_stdout(&mut child)?;
+                let result: Value = serde_json::from_slice(&output).map_err(|_| {
                     crate::locale::tr(
                         "同步结果无效；请检查同步状态后重试",
                         "Invalid sync result. Review the sync state before trying again.",

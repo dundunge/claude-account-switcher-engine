@@ -145,10 +145,11 @@ function avatar (a, size = 36, live = false) {
 // ----------------------------------------------------------------- usage ---
 
 const level = p => (p >= 90 ? 'danger' : p >= 75 ? 'warn' : 'accent')
-const usageDisplayKey = u => u ? [u.at, u.fh, u.sd, u.source, u.fhResetAt, u.sdResetAt, Math.floor(Math.max(0, u.age) / 60000)].join('/') : ''
-const usageIsOld = u => u && u.age > 10 * 60000
-const usageAge = u => u ? (u.source === 'official'
-  ? tf('{0}查询 · 官方', 'Official · {0}', fmtAgo(u.at))
+const usageAgeMs = u => u ? Math.max(0, Date.now() - u.at) : 0
+const usageDisplayKey = u => u ? [u.at, u.fh, u.sd, u.source, u.fhResetAt, u.sdResetAt, u.fhResetText, u.sdResetText, Math.floor(usageAgeMs(u) / 60000)].join('/') : ''
+const usageIsOld = u => u && usageAgeMs(u) > 10 * 60000
+const usageAge = u => u ? (u.source === 'claude-ui'
+  ? tf('{0}读取 · Claude 面板', 'Claude panel · read {0}', fmtAgo(u.at))
   : tf('{0}采样 · 本地', 'Local · {0}', fmtAgo(u.at))) + (usageIsOld(u) ? tr(' · 旧数据', ' · stale') : '') : tr('暂无额度记录', 'No usage data')
 
 function usageTip (u) {

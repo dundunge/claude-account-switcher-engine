@@ -28,7 +28,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-      - run: node --test tests/i18n.test.cjs
+      - run: node --test tests/*.test.cjs
       - uses: actions/setup-python@v5
         if: runner.os == 'macOS'
         with:

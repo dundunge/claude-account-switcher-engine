@@ -82,7 +82,8 @@ def install(apply=False):
         raise RuntimeError("CUSTOM_BUILD_MARKER_MISSING")
     preview = {"status": "preview", "engine_version": engine.VERSION,
                "profiles_to_create": 2, "plan": engine.build_plan(config).summary(),
-               "binary_sha256": sha(binary_source), "engine_sha256": sha(engine_source)}
+               "binary_sha256": sha(binary_source), "engine_sha256": sha(engine_source),
+               "bridge_sha256": sha(bridge_source)}
     if not apply:
         return preview
 
@@ -127,6 +128,7 @@ def install(apply=False):
             engine.atomic_write(bridge_path, engine.File(bridge_source.read_bytes(), time.time_ns(), 0o700), creating=True)
             hook = {'schema_version': 1, 'hook_enabled': True,
                     'python_path': '/usr/bin/python3', 'bridge_path': str(bridge_path),
+                    'bridge_version': '0.3.0', 'bridge_sha256': sha(bridge_source),
                     'engine_path': str(engine_path), 'engine_sha256': sha(engine_path),
                     'source_config_path': str(old_config),
                     'case_accounts_path': str(accounts_path), 'profiles_parent': str(support)}

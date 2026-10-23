@@ -18,10 +18,14 @@
 //! creates missing index entries. It never edits or deletes anything of Claude's.
 
 use crate::store::Account;
+#[cfg(test)]
+use crate::{platform, store};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -175,6 +179,29 @@ fn index_entries(profile: &Path) -> Vec<Entry> {
         }
     }
     out
+}
+
+fn deletion_marked(profile: &Path, local_id: &str, cli_session_id: &str) -> bool {
+    let identities = [
+        local_id,
+        local_id.strip_prefix("local_").unwrap_or(local_id),
+        cli_session_id,
+    ];
+    namespaces(profile).into_iter().any(|ns| {
+        read_dir(&ns.dir).any(|entry| {
+            let name = name(&entry);
+            let Some(identity) = name.strip_prefix("deleted_") else {
+                return false;
+            };
+            if !identities.contains(&identity) {
+                return false;
+            }
+            std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .is_some_and(|value| value > 0)
+        })
+    })
 }
 
 /// Where a rebuilt entry should go: the busiest namespace, matching the signed-in
@@ -540,7 +567,9 @@ fn scan_account(
         .mappings
         .iter()
         .filter(|(cli, local)| {
-            !known.contains(cli.as_str()) && !known_local.contains(local.as_str())
+            !known.contains(cli.as_str())
+                && !known_local.contains(local.as_str())
+                && !deletion_marked(&account.dir, local, cli)
         })
         // A mapping whose transcript is already gone has nothing to restore from.
         .filter_map(|(cli, local)| {
@@ -608,12 +637,45 @@ pub fn scan(accounts: &[Account], backup_root: &Path, places: &Places) -> Scan {
 
 /// Recreate a missing index entry so the session reappears in Claude's list.
 ///
-/// titleSource MUST be "user". The app clears any title whose source is not
-/// "user" when it loads the entry — a rebuilt session would come back untitled.
-pub fn rebuild(account: &Account, orphan: &Orphan) -> Result<PathBuf, String> {
+/// This is deliberately a small, metadata-only record.  Permission and browser
+/// policy fields belong to Claude's existing destination records and are never
+/// invented by a repair action.  The same operation lock used by switching and
+/// profile lifecycle actions prevents a repair racing an archive or launch.
+// Kept private for the module's filesystem regression tests.  The application
+// command uses local_sync::rebuild_session, which delegates to the Python
+// engine's lock, snapshot and stopped-process transaction.
+#[cfg(test)]
+fn rebuild(account: &Account, orphan: &Orphan) -> Result<PathBuf, String> {
+    let _operation = store::OPERATION_LOCK.try_lock().map_err(|_| {
+        crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        )
+    })?;
+    if platform::is_running(&account.dir) {
+        return Err(crate::locale::tr(
+            "请先正常退出 Claude，再恢复会话索引。",
+            "Quit Claude normally before rebuilding a session index.",
+        )
+        .into());
+    }
+    if !orphan.local_id.starts_with("local_")
+        || orphan.local_id.contains(['/', '\\'])
+        || orphan.cli_session_id.is_empty()
+        || orphan.cli_session_id.contains(['/', '\\'])
+    {
+        return Err(crate::locale::tr("会话标识无效。", "The session identity is invalid.").into());
+    }
     let ns = target_namespace(&account.dir).ok_or(
         "This profile has no session index yet. Open the account in Claude once, then try again.",
     )?;
+    if deletion_marked(&account.dir, &orphan.local_id, &orphan.cli_session_id) {
+        return Err(crate::locale::tr(
+            "该会话已有主动删除标记，未恢复。",
+            "This session has an explicit deletion marker and was not rebuilt.",
+        )
+        .into());
+    }
     let dest = ns.dir.join(format!("{}.json", orphan.local_id));
     if dest.exists() {
         return Err(crate::locale::tr(
@@ -622,11 +684,18 @@ pub fn rebuild(account: &Account, orphan: &Orphan) -> Result<PathBuf, String> {
         )
         .into());
     }
-    let home = dirs::home_dir()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
-    let cwd = orphan.cwd.clone().unwrap_or(home);
+    let cwd = orphan
+        .cwd
+        .clone()
+        .filter(|value| Path::new(value).is_absolute());
+    let Some(cwd) = cwd else {
+        return Err(crate::locale::tr(
+            "会话目录未知，未恢复。",
+            "The session folder is unknown, so it was not rebuilt.",
+        )
+        .into());
+    };
+    let model = orphan.model.clone().filter(|value| !value.is_empty());
     let entry = serde_json::json!({
         "sessionId": orphan.local_id,
         "cliSessionId": orphan.cli_session_id,
@@ -635,26 +704,31 @@ pub fn rebuild(account: &Account, orphan: &Orphan) -> Result<PathBuf, String> {
         "lastFocusedAt": orphan.last_activity_at.round() as i64,
         "createdAt": orphan.created_at.round() as i64,
         "lastActivityAt": orphan.last_activity_at.round() as i64,
-        "model": orphan.model.as_deref().unwrap_or("claude-opus-5"),
-        "effort": "high",
+        "model": model,
         "isArchived": false,
         "title": orphan.title,
-        "titleSource": "user",
-        "permissionMode": "auto",
-        "remoteMcpServersConfig": [],
-        "chromePermissionMode": "skip_all_permission_checks",
-        "completedTurns": 0,
-        "alwaysAllowedReasons": [],
-        "sessionPermissionUpdates": [],
-        "classifierSummaryEnabled": true,
-        "spawnSeed": {}
+        "titleSource": "user"
     });
-    std::fs::create_dir_all(&ns.dir).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &dest,
-        serde_json::to_string_pretty(&entry).unwrap_or_default(),
-    )
-    .map_err(|e| e.to_string())?;
+    let temp = ns
+        .dir
+        .join(format!(".case-health-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let data = serde_json::to_vec_pretty(&entry).map_err(|e| e.to_string())?;
+        let mut file = std::fs::OpenOptions::new();
+        file.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            file.mode(0o600);
+        }
+        let mut out = file.open(&temp).map_err(|e| e.to_string())?;
+        out.write_all(&data).map_err(|e| e.to_string())?;
+        out.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&temp, &dest).map_err(|e| e.to_string())?;
+        Ok::<(), String>(())
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result?;
     Ok(dest)
 }
 
@@ -771,6 +845,19 @@ mod tests {
         std::fs::write(
             entry,
             format!("{{\"sessionId\":\"local_abc\",\"cliSessionId\":\"{CLI_ID}\"}}"),
+        )
+        .unwrap();
+        assert_eq!(f.find("default").orphans.len(), 0);
+    }
+
+    #[test]
+    fn an_explicit_deletion_marker_is_not_offered_for_rebuild() {
+        let f = Fixture::new();
+        std::fs::write(
+            f.places
+                .default_profile
+                .join("claude-code-sessions/acct/org/deleted_local_abc"),
+            "1786528800000",
         )
         .unwrap();
         assert_eq!(f.find("default").orphans.len(), 0);

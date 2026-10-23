@@ -197,9 +197,7 @@ pub fn on_menu(app: &AppHandle, id: &str) {
             // Menu events arrive on the main thread; a launch probes and spawns.
             let app = app.clone();
             std::thread::spawn(move || {
-                if let Some(a) = crate::find(&id) {
-                    crate::launch_account(&a);
-                }
+                crate::launch_account(&app, &id);
                 refresh(&app);
             });
         }

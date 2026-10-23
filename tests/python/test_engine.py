@@ -413,6 +413,18 @@ class EngineTests(unittest.TestCase):
             s.restore(self.c, result["snapshot"], guard=lambda: None)
         self.assertEqual(before, self.tree())
 
+    def test_new_index_creation_leaves_single_link_inodes(self):
+        self.put()
+        self.run_sync()
+        for peer in range(2):
+            self.assertEqual(self.path(peer).stat().st_nlink, 1)
+
+    def test_transcript_metadata_is_indexed_once_per_plan(self):
+        self.put()
+        with mock.patch.object(s, 'transcript_index', wraps=s.transcript_index) as index:
+            s.build_plan(self.c)
+        self.assertEqual(index.call_count, 1)
+
     def test_running_process_blocks_apply_without_index_change(self):
         self.put()
         before = self.tree()
@@ -452,6 +464,28 @@ class EngineTests(unittest.TestCase):
             self.run_sync()
         s.restore(self.c, sid, guard=lambda: None)
         self.assertEqual(before, self.tree())
+        self.assertEqual(s.unfinished(self.c), [])
+
+    def test_restore_interruption_is_journaled_and_can_resume(self):
+        self.put(isArchived=True)
+        result = self.run_sync()
+        calls = 0
+
+        def guard():
+            nonlocal calls
+            calls += 1
+            # Initial guard and first operation guard pass; stop before the
+            # second operation so the restore has both applied and pending work.
+            if calls == 3:
+                raise s.SyncError("CLAUDE_MUST_BE_FULLY_CLOSED")
+
+        with self.assertRaises(s.SyncError) as ctx:
+            s.restore(self.c, result["snapshot"], guard=guard)
+        self.assertEqual(ctx.exception.code, "CLAUDE_MUST_BE_FULLY_CLOSED")
+        self.assertEqual(ctx.exception.snapshot, result["snapshot"])
+        manifest = self.state / "snapshots" / result["snapshot"] / "manifest.json"
+        self.assertEqual(json.loads(manifest.read_text())["state"], "restore_interrupted")
+        s.restore(self.c, result["snapshot"], guard=lambda: None)
         self.assertEqual(s.unfinished(self.c), [])
 
     def test_process_start_mid_apply_stops_and_leaves_recovery_journal(self):

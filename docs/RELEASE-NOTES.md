@@ -1,15 +1,20 @@
-# CASE 独立维护版 / Independent edition
+# CASE 4.2.1 独立维护版 / Independent edition
 
 基于 Patryk Starostka 的 CASE 4.1.0 开发，保留 MIT 许可；详见 NOTICE.md。
 本仓库独立维护，更新检查仅指向 dundunge/claude-account-switcher-engine。
 
 - 中文 / English 即时切换，并保留选择。
 - 分别显示 5 小时、周额度的已用比例、来源和采样时间。
-- 刷新本地记录；可手动尝试官方查询，失败保留旧数据。
+- 直接读取已打开账号的 Claude 原生额度面板；各账号只在 Claude 中登录一次。
+- 首次使用需允许 CASE 辅助功能权限。未打开账号显示上次读数和时间，不自动切号。
+- 显示读取时的原始重置提示，不推算服务器刷新时间或倒计时。
+- 使用系统界面读取，移除旧的独立 Cookie/API 查询路径；不需要 CodexBar 或 OAuth 额度授权。
 - 本地同步引擎 0.3.0 保留父子会话关系，正文由 Claude 自己保存。
+- 发布前用 `tools/compatibility_manifest.py` 记录 App、engine、bridge、原生额度模块和 schema 的 SHA-256；新 hook 也固定 bridge hash。
 
-官方查询可能要求浏览器验证；当前实际查询遇到该限制，实时刷新未验收成功。
-请在 Claude 的设置 → 用量中查看当前官方值。
+The usage reader observes Claude's native panel through macOS Accessibility. There is no extra account login,
+cookie extraction or independent usage API call. Closed accounts retain dated observations. Read time is not
+a server-update timestamp. See docs/NATIVE-USAGE.md for support boundaries and acceptance requirements.
 
 ## 已部署用户升级 / Existing installations
 

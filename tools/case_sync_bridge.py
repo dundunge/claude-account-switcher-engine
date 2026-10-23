@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +23,25 @@ import time
 
 class BridgeError(Exception):
     pass
+
+
+MAX_ACCOUNTS = 8
+DEFAULT_PROFILE_NAME = "Claude"
+BRIDGE_VERSION = "0.3.0"
+
+
+def progress(stage):
+    # Progress is a side channel for CASE's UI.  Keep stdout as one final JSON
+    # document so existing launch hooks and offline callers remain compatible.
+    if os.environ.get("CASE_PROGRESS") != "1":
+        return
+    print(f"CASE_STAGE {stage}", file=sys.stderr, flush=True)
+
+
+def valid_profile_name(name):
+    return name == DEFAULT_PROFILE_NAME or (
+        name.startswith("Claude-") and len(name) > len("Claude-")
+    )
 
 
 def checked(path):
@@ -59,13 +79,26 @@ def load_engine(config):
     return module
 
 
+def check_bridge_hash(config):
+    configured_version = config.get("bridge_version")
+    if configured_version is not None and configured_version != BRIDGE_VERSION:
+        raise BridgeError("UNSUPPORTED_BRIDGE_VERSION")
+    expected = config.get("bridge_sha256")
+    if expected is None:
+        return  # Existing installations can be upgraded once by the installer.
+    if (not isinstance(expected, str) or
+            not re.fullmatch(r"[0-9a-f]{64}", expected) or
+            hashlib.sha256(Path(__file__).read_bytes()).hexdigest() != expected):
+        raise BridgeError("BRIDGE_HASH_MISMATCH")
+
+
 def discover(config, target, engine):
     """Only CASE's explicit account list and the old opt-in partitions are used."""
     legacy = engine.Config.load(checked(config["source_config_path"]))
     if legacy.locations:
         raise BridgeError("LEGACY_SCHEMA_ONE_REQUIRED")
     accounts = read_json(config["case_accounts_path"]).get("accounts")
-    if not isinstance(accounts, list) or not 1 <= len(accounts) <= 8:
+    if not isinstance(accounts, list) or not 1 <= len(accounts) <= MAX_ACCOUNTS:
         raise BridgeError("CASE_ACCOUNTS_REQUIRED")
     parent = engine.absolute(config["profiles_parent"])
     target = engine.absolute(str(target))
@@ -81,7 +114,7 @@ def discover(config, target, engine):
         if (not isinstance(identity, str) or not re.fullmatch(engine.UUID, identity)
                 or directory in seen_dirs or identity in seen_ids):
             raise BridgeError("DUPLICATE_OR_INVALID_CASE_ACCOUNT")
-        if directory.parent != parent or not directory.name.startswith("Claude-"):
+        if directory.parent != parent or not valid_profile_name(directory.name):
             raise BridgeError("UNEXPECTED_PROFILE_LOCATION")
         engine.safe_chain(directory)
         if not directory.is_dir():
@@ -193,9 +226,11 @@ def run(config, target, engine, dry_run=False):
         return {"status": "preview", **details, **engine.build_plan(c).summary()}
     with switch_lock(engine, c.state_dir):
         # Check the configured paths before requesting any application to close.
+        progress("waiting_exit")
         graceful_close(engine)
         # Re-discover after exit so the last completed save and newly created
         # account/organization directory are included, but never silently swap roots.
+        progress("validate")
         fresh, bootstrap, initialized = discover(config, target, engine)
         if fresh != value:
             raise BridgeError("PROFILE_SCOPE_CHANGED_RETRY")
@@ -208,9 +243,78 @@ def run(config, target, engine, dry_run=False):
             engine.atomic_write(runtime, engine.File(data, time.time_ns(), 0o600), creating=True)
         elif old.data != data:
             raise BridgeError("RUNTIME_CONFIG_CHANGED")
+        progress("sync")
         result = engine.apply(c, engine.build_plan(c))
         output = {**result, **details, "runtime_config_path": str(runtime)}
         engine.state_write(c.state_dir / 'case-last-result.json', output)
+        progress("completed")
+        return output
+
+
+def _repair_partition(value, target):
+    root = Path(target) / 'claude-code-sessions'
+    matches = [p for p in value['partitions']
+               if Path(p['index_root']) == root]
+    if len(matches) != 1:
+        raise BridgeError('REPAIR_PARTITION_UNRESOLVED')
+    p = matches[0]
+    return f"{p['profile']}/{p['account']}/{p['organization']}"
+
+
+def _repair_entry(orphan, engine):
+    if not isinstance(orphan, dict):
+        raise BridgeError('INVALID_REPAIR_ENTRY')
+    local_id = orphan.get('localId')
+    cli_id = orphan.get('cliSessionId')
+    if (not isinstance(local_id, str) or not re.fullmatch('local_' + engine.UUID, local_id)
+            or not isinstance(cli_id, str) or not re.fullmatch(engine.UUID, cli_id)):
+        raise BridgeError('INVALID_REPAIR_ENTRY')
+    cwd = orphan.get('cwd')
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or '..' in Path(cwd).parts:
+        raise BridgeError('INVALID_REPAIR_ENTRY')
+    def timestamp(key):
+        value = orphan.get(key)
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise BridgeError('INVALID_REPAIR_ENTRY')
+        return int(round(value))
+    entry = {
+        'sessionId': local_id, 'cliSessionId': cli_id, 'cwd': cwd,
+        'originCwd': cwd, 'createdAt': timestamp('createdAt'),
+        'lastFocusedAt': timestamp('lastActivityAt'),
+        'lastActivityAt': timestamp('lastActivityAt'),
+        'title': orphan.get('title') if isinstance(orphan.get('title'), str) else 'Untitled session',
+        'titleSource': 'user', 'isArchived': False,
+    }
+    if isinstance(orphan.get('model'), str) and orphan['model']:
+        entry['model'] = orphan['model']
+    return local_id, entry
+
+
+def run_repair(config, target, engine, orphan, dry_run=False):
+    if config.get('schema_version') != 1 or config.get('hook_enabled') is not True:
+        raise BridgeError('CASE_SYNC_NOT_ENABLED')
+    progress("validate")
+    value, bootstrap, initialized = discover(config, target, engine)
+    if bootstrap:
+        raise BridgeError('REPAIR_REQUIRES_INITIALIZED_PROFILE')
+    c = engine.Config.load_multi(value)
+    if engine.unfinished(c):
+        raise BridgeError('RECOVERY_REQUIRED')
+    local_id, entry = _repair_entry(orphan, engine)
+    peer = _repair_partition(value, target)
+    relative = peer + '/' + local_id + '.json'
+    if dry_run:
+        return {'status': 'repair_preview', 'partition': peer, 'sessionId': local_id}
+    with switch_lock(engine, c.state_dir):
+        engine.assert_stopped()
+        fresh, fresh_bootstrap, fresh_initialized = discover(config, target, engine)
+        if fresh != value or fresh_bootstrap:
+            raise BridgeError('PROFILE_SCOPE_CHANGED_RETRY')
+        progress("sync")
+        result = engine.rebuild(c, relative, entry)
+        output = {**result, 'partition': peer, 'sessionId': local_id}
+        engine.state_write(c.state_dir / 'case-last-result.json', output)
+        progress("completed")
         return output
 
 
@@ -219,11 +323,17 @@ def main(argv=None):
     parser.add_argument('--config', required=True)
     parser.add_argument('--target', required=True)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--repair', action='store_true')
     args = parser.parse_args(argv)
     try:
         config = read_json(args.config)
+        check_bridge_hash(config)
         engine = load_engine(config)
-        result = run(config, Path(args.target), engine, args.dry_run)
+        if args.repair:
+            orphan = json.load(sys.stdin)
+            result = run_repair(config, Path(args.target), engine, orphan, args.dry_run)
+        else:
+            result = run(config, Path(args.target), engine, args.dry_run)
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as error:

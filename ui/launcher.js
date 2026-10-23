@@ -27,9 +27,11 @@ let searchInput = null
 let rowsEl = null
 let rowEls = []
 let launching = false
+let activeLaunchId = null
 let rerenderEditor = null
 const quotaRequests = new Map()
 let refreshingAll = false
+const MAX_ACCOUNTS = 8
 
 const chromeName = dir => S.chromeProfiles.find(p => p.dir === dir)?.name || dir
 const findAccount = id => S.accounts.find(a => a.id === id)
@@ -102,8 +104,11 @@ function viewList () {
     h('label', { class: 'search' }, icon('search', 16, 2), searchInput, h('kbd', {}, combo('K'))),
     rowsEl,
     h('div', { class: 'notice' }, h('span', {}, tr("切号前会正常退出 Claude 并同步本地会话。长任务请先完成文件交接。", "Switching quits Claude normally and syncs local sessions. Write a file handoff before switching a long task."))),
+    S.accounts.length >= MAX_ACCOUNTS
+      ? h('div', { class: 'notice warn', role: 'status' }, tr(`最多支持 ${MAX_ACCOUNTS} 个账号，请先归档或移除一个账号。`, `CASE supports at most ${MAX_ACCOUNTS} accounts. Archive or remove one first.`))
+      : '',
     h('footer', { class: 'footer' },
-      h('button', { type: 'button', class: 'btn quiet', onclick: () => show('account', { isNew: true }) }, icon('plus', 15, 2), tr("添加账号", "New account")),
+      h('button', { type: 'button', class: 'btn quiet', disabled: S.accounts.length >= MAX_ACCOUNTS, title: S.accounts.length >= MAX_ACCOUNTS ? tr(`最多 ${MAX_ACCOUNTS} 个账号`, `Up to ${MAX_ACCOUNTS} accounts`) : null, onclick: () => show('account', { isNew: true }) }, icon('plus', 15, 2), tr("添加账号", "New account")),
       S.archivedCount
         ? h('button', { type: 'button', class: 'btn quiet', onclick: () => api.openSettings('archived') }, icon('archive', 15), tf("{0} 个已归档", "{0} archived", S.archivedCount))
         : '',
@@ -179,16 +184,17 @@ function emptyState () {
   const q = S.query.trim()
   if (!q) {
     return h('div', { class: 'empty' }, h('span', {}, tr("还没有添加账号。", "No accounts yet.")),
-      h('button', { type: 'button', class: 'btn primary', onclick: () => show('account', { isNew: true }) }, icon('plus', 15, 2), tr("添加账号", "New account")))
+      h('button', { type: 'button', class: 'btn primary', disabled: S.accounts.length >= MAX_ACCOUNTS, onclick: () => show('account', { isNew: true }) }, icon('plus', 15, 2), tr("添加账号", "New account")))
   }
   return h('div', { class: 'empty' }, h('span', {}, tf("没有名为“{0}”的账号。", "No account is called “{0}”.", q)),
-    h('button', { type: 'button', class: 'btn primary', onclick: () => show('account', { isNew: true, name: q }) }, tf("创建“{0}”", "Create “{0}”", q)))
+    h('button', { type: 'button', class: 'btn primary', disabled: S.accounts.length >= MAX_ACCOUNTS, onclick: () => show('account', { isNew: true, name: q }) }, tf("创建“{0}”", "Create “{0}”", q)))
 }
 
 async function launch (a) {
   if (launching) return toast(tr("正在切换账号，请稍候。", "An account switch is in progress. Please wait."))
   launching = true
-  toast(tr("正在保存会话并打开账号…", "Saving sessions and opening the account…"))
+  activeLaunchId = a.id
+  toast(tr("等待 Claude 退出…", "Waiting for Claude to quit…"))
   try {
     closePanel()
     const res = await api.launch(a.id)
@@ -200,8 +206,18 @@ async function launch (a) {
     setTimeout(() => api.dismiss(), 450)
   } finally {
     launching = false
+    activeLaunchId = null
   }
 }
+
+const launchStageText = stage => ({
+  waiting_exit: tr('等待 Claude 退出…', 'Waiting for Claude to quit…'),
+  validate: tr('校验同步范围…', 'Validating the sync scope…'),
+  sync: tr('同步会话索引…', 'Syncing session indexes…'),
+  launching: tr('正在启动 Claude…', 'Launching Claude…'),
+  completed: tr('已完成', 'Completed'),
+  error: tr('操作被阻止，保留可恢复状态。', 'Operation blocked; the recoverable state was kept.')
+}[stage] || tr('正在处理…', 'Working…'))
 
 async function quit (a) {
   const res = await api.quitAccount(a.id)
@@ -353,7 +369,7 @@ function viewAccount ({ id, isNew, name: preset = '', focus, draft }) {
     parts.push(chromeCard, storageCard(a))
     loadChrome(a, chromeCard)
   } else {
-    parts.push(h('p', { class: 'help' }, tr("将创建空白账号目录。首次打开后，请在 Claude 中完成官方登录并创建一条简短 Code 会话，然后退出重开以同步历史。", "A blank profile will be created. Sign in officially in Claude, create a short Code session, then quit and reopen it to import local history.")))
+    parts.push(h('p', { class: 'help' }, tr("将创建空白账号目录。在 Claude 中登录一次即可使用账号并查看额度；CASE 直接读取 Claude 的额度面板。首次创建简短 Code 会话后，退出重开以同步历史。", "A blank profile will be created. Sign in once in Claude for both the account and usage. CASE reads Claude’s quota panel. After creating a short Code session, quit and reopen to import local history.")))
   }
 
   if (!isNew && a.running) {
@@ -376,18 +392,16 @@ function viewAccount ({ id, isNew, name: preset = '', focus, draft }) {
 
 function quotaError (code) {
   const messages = {
-    REFRESH_IN_PROGRESS: tr('正在查询，请稍候。', 'A query is already running. Please wait.'),
-    REFRESH_COOLDOWN: tr('请间隔 60 秒再查询这个账号。', 'Wait 60 seconds before querying this account again.'),
-    KEYCHAIN_UNAVAILABLE: tr('无法读取钥匙串授权，请在 Claude 内查看额度。', 'Keychain access is unavailable. View usage in Claude.'),
-    KEYCHAIN_TIMEOUT: tr('钥匙串授权未完成，请在 Claude 内查看。', 'Keychain authorization did not finish. View usage in Claude.'),
-    NO_SESSION: tr('这个目录没有有效登录，请在 Claude 中查看登录状态。', 'This profile has no valid session. Check its sign-in in Claude.'),
-    NO_ORGANIZATION: tr('无法确定账号组织，请在 Claude 中查看。', 'The organization could not be determined. View usage in Claude.'),
-    HTTP_401: tr('官方登录已失效，请在 Claude 中处理登录。', 'The official session has expired. Sign in again in Claude.'),
-    HTTP_403: tr('官方接口拒绝查询，请在 Claude 中查看额度。', 'The official endpoint refused this query. View usage in Claude.'),
-    BROWSER_VERIFICATION_REQUIRED: tr('官方接口要求浏览器验证，CASE 无法直接查询。请在 Claude 的设置 → 用量中查看。', 'The official endpoint requires browser verification. View Settings → Usage in Claude.'),
-    HTTP_429: tr('官方接口暂时限流，请稍后再试。', 'The official endpoint is rate limiting requests. Try later.'),
-    NETWORK_ERROR: tr('查询未连通，请检查网络；旧读数已保留。', 'Could not reach Claude. Check the connection; the previous reading is retained.'),
-    PLATFORM_UNSUPPORTED: tr('官方额度查询目前只支持 macOS。', 'Official usage queries currently support macOS only.')
+    REFRESH_IN_PROGRESS: tr('另一次面板读取正在进行，请稍候。', 'Another panel read is in progress. Please wait.'),
+    ACCESSIBILITY_REQUIRED: tr('请在系统设置 → 隐私与安全性 → 辅助功能中允许 CASE 读取 Claude 界面，然后重试。此权限只需为 CASE 配置一次，各账号不用重复登录。', 'Allow CASE in System Settings → Privacy & Security → Accessibility, then retry. This is one permission for CASE; accounts need no extra sign-in.'),
+    ACCOUNT_NOT_OPEN: tr('此账号未打开，保留上次读数。切换到它后可读取当前额度。', 'This account is closed. Its last reading is retained; open it to read current usage.'),
+    DESKTOP_IDENTITY_MISSING: tr('请先在这个账号的 Claude 窗口完成登录。', 'Sign in to this account in Claude first.'),
+    IDENTITY_CHANGED: tr('读取期间登录账号发生变化，本次读数未保存。请重试。', 'The signed-in account changed during the read. This observation was not saved. Try again.'),
+    PROFILE_PROCESS_AMBIGUOUS: tr('无法唯一确认该账号的 Claude 进程，已停止读取。', 'Could not uniquely identify this account’s Claude process. Reading stopped.'),
+    PANEL_UNAVAILABLE: tr('未找到 Claude 的额度入口。请先打开 Claude 的 Code 会话及右下角 Usage 面板，再重试。', 'Claude’s usage control was not found. Open a Code session and its Usage panel at the bottom right, then retry.'),
+    PANEL_UNRECOGNIZED: tr('未识别到额度面板中的数字，旧读数已保留。请在 Claude 中查看额度。', 'The quota panel’s numbers were not recognized. The previous reading is retained. View usage in Claude.'),
+    SAVE_FAILED: tr('无法保存面板读数，请检查本地磁盘。', 'Could not save the panel observation. Check the local disk.'),
+    PLATFORM_UNSUPPORTED: tr('Claude 面板读取目前只支持 macOS。', 'Reading Claude’s panel currently supports macOS only.')
   }
   return (messages[code] || tr('未能更新额度，旧读数已保留。', 'Usage could not be updated. The previous reading is retained.')) + ` (${code})`
 }
@@ -395,17 +409,18 @@ function quotaError (code) {
 function usageCard (account, named = false) {
   const u = account.usage
   const request = quotaRequests.get(account.id) || {}
-  const reset = (label, at) => at ? h('p', { class: 'help quota-reset' }, tf('{0}重置：{1}', '{0} resets: {1}', label, fmtWhen(at))) : ''
+  const reset = (label, text) => text ? h('p', { class: 'help quota-reset' }, tf('读取时的{0}提示：{1}', '{0} notice when read: {1}', label, text)) : ''
   return h('section', { class: 'card usage-card', dataset: { usageId: account.id, named: String(named) }, 'aria-label': named ? account.name : tr('订阅额度', 'Plan usage') },
     h('div', { class: 'usage-line' }, h('div', { class: 'top' }, h('b', {}, named ? account.name : tr('订阅额度', 'Plan usage')), h('span', { class: 'help' }, usageAge(u)))),
-    quotaLine(tr('5 小时额度', '5-hour limit'), u?.fh), reset(tr('5 小时', '5-hour limit'), u?.fhResetAt),
-    quotaLine(tr('周额度', 'Weekly limit'), u?.sd), reset(tr('周额度', 'Weekly limit'), u?.sdResetAt),
-    h('p', { class: 'help' }, tr('百分比表示已使用的额度；查询失败时保留旧读数。本地采样可能延迟，未返回的重置时间不作推算。', 'Percentages show used quota. A failed query keeps the previous reading. Local samples may lag; reset times are shown only when returned by Claude.')),
+    quotaLine(tr('5 小时额度', '5-hour limit'), u?.fh), reset(tr('5 小时', '5-hour limit'), u?.fhResetText),
+    quotaLine(tr('周额度', 'Weekly limit'), u?.sd), reset(tr('周额度', 'Weekly limit'), u?.sdResetText),
+    h('p', { class: 'help' }, account.running ? tr('直接读取此账号的 Claude 额度面板。百分比为已用比例；读取时间不代表服务器刚刚更新。', 'Read this account’s Claude quota panel directly. Percentages show used quota; read time is not a server update timestamp.') : tr('账号未打开，显示上次读数及其时间。切换到这个账号后才能读取当前面板。', 'This account is closed. Showing its last observation and time; open the account to read its current panel.')),
     h('div', { class: 'quota-actions' },
-      h('button', { type: 'button', class: 'btn', disabled: request.pending, onclick: () => refreshQuota(account.id, false), title: tr('重新读取本地文件，不会促使 Claude 生成新采样', 'Re-read local files; this does not make Claude record a new sample') }, icon('refresh', 14), tr('刷新本地额度', 'Refresh local usage')),
-      h('button', { type: 'button', class: 'btn quiet', disabled: request.pending, onclick: () => refreshQuota(account.id), title: tr('尝试官方接口；可能要求浏览器验证', 'Try the official endpoint; browser verification may be required') }, request.pending ? tr('查询中…', 'Querying…') : tr('尝试官方查询', 'Try official query'))),
+      h('button', { type: 'button', class: 'btn', disabled: request.pending, onclick: () => refreshQuota(account.id, false), title: tr('重读 Claude 保存的历史文件与 CASE 上次面板读数', 'Re-read Claude’s saved history and CASE’s last panel observation') }, icon('refresh', 14), tr('重读本地记录', 'Read saved records')),
+      h('button', { type: 'button', class: 'btn primary', disabled: request.pending || !account.running, onclick: () => refreshQuota(account.id), title: tr('可能短暂打开 Claude 的额度弹窗，读取后恢复；不会切号', 'May briefly open Claude’s quota popover and close it after reading; does not switch accounts') }, request.pending ? tr('读取中…', 'Reading…') : tr('从 Claude 读取', 'Read from Claude')),
+      request.code === 'ACCESSIBILITY_REQUIRED' ? h('button', { type: 'button', class: 'btn quiet', onclick: () => api.openLink('accessibility') }, tr('打开辅助功能设置', 'Open Accessibility settings')) : ''),
     request.code ? h('p', { class: 'help warn', role: 'status' }, quotaError(request.code)) : '',
-    request.message ? h('p', { class: 'help', role: 'status' }, request.localOnly ? tr('已重读本地文件；采样时间未必改变。', 'Local files re-read; their sample time may be unchanged.') : tr('已查询官方接口。', 'Queried the official endpoint.')) : '')
+    request.message ? h('p', { class: 'help', role: 'status' }, request.localOnly ? tr('已重读本地记录；原始采样时间保留。', 'Saved records re-read; their original timestamps are retained.') : tr('已读取 Claude 自己的额度面板。', 'Read Claude’s own quota panel.')) : '')
 }
 
 function paintQuota (id) {
@@ -416,14 +431,21 @@ function paintQuota (id) {
   })
 }
 
-async function refreshQuota (id, official = true) {
+// Age is derived from the original observation timestamp.  Repaint while the
+// page is visible so "多久前读取" and the stale marker do not wait for another
+// account probe or a manual refresh.
+setInterval(() => {
+  if (S.view === 'usage' || S.view === 'account') paintQuota()
+}, 30000)
+
+async function refreshQuota (id, native = true) {
   if (quotaRequests.get(id)?.pending) return
   quotaRequests.set(id, { pending: true })
   paintQuota(id)
   try {
-    const result = await api.refreshUsage(id, official)
+    const result = await api.refreshUsage(id, native)
     const account = findAccount(id)
-    if (account && result.usage) account.usage = result.usage
+    if (account && Object.hasOwn(result, 'usage')) account.usage = result.usage
     quotaRequests.set(id, { pending: false, code: result.ok ? null : result.code || 'REFRESH_FAILED', message: result.ok, localOnly: result.localOnly })
   } catch {
     quotaRequests.set(id, { pending: false, code: 'HELPER_FAILED' })
@@ -437,11 +459,11 @@ function viewUsage () {
       h('button', { type: 'button', class: 'btn', disabled: refreshingAll, onclick: async () => {
         refreshingAll = true
         viewUsage()
-        for (const account of S.accounts) await refreshQuota(account.id, false)
+        for (const account of S.accounts) await refreshQuota(account.id, Boolean(account.running))
         refreshingAll = false
         if (S.view === 'usage') viewUsage()
-      } }, tr('刷新全部本地记录', 'Refresh all local samples'))),
-    h('p', { class: 'help' }, tr('本地刷新只重读 Claude 已保存的采样。官方查询不发送模型消息，但可能要求浏览器验证；此时请在 Claude 的设置 → 用量中查看。首次读取登录状态时，macOS 可能要求钥匙串授权。官方查询间隔至少 60 秒。', 'Local refresh re-reads samples already saved by Claude. Official queries use no model messages, but may require browser verification; view Settings → Usage in Claude in that case. macOS may request Keychain access. Official queries have a 60-second cooldown.')),
+      } }, tr('更新额度记录', 'Update usage records'))),
+    h('p', { class: 'help' }, tr('各账号只需在 Claude 中登录一次。更新时读取已打开账号的原生额度面板；未打开账号重读历史记录。首次读取需要给 CASE 辅助功能权限，额度由 Claude 自己获取。', 'Sign in once per account in Claude. Updates read the open account’s native quota panel and saved records for closed accounts. Allow CASE Accessibility access once; Claude handles its own usage requests.')),
     S.accounts.map(account => usageCard(account, true))))
 }
 
@@ -671,6 +693,7 @@ async function viewSetup () {
   const go = h('button', { type: 'button', class: 'btn tall primary', onclick: () => finish(found.filter(f => f.selected && f.name.trim())) })
   const paintGo = () => {
     const n = found.filter(f => f.selected && f.name.trim()).length
+    go.disabled = n > MAX_ACCOUNTS
     go.textContent = n ? tf("添加 {0}", "Add {0}", plural(n, 'account')) : tr("继续", "Continue")
   }
   const rows = found.map(f => h('div', { class: 'discovered' },
@@ -689,7 +712,8 @@ async function viewSetup () {
         ? h('section', { class: 'stack', 'aria-label': tr("已发现账号目录", "Profiles found") },
           h('h2', { class: 'section-label' }, IS_WIN ? tr("在此电脑上发现", "Found on this PC") : tr("在此 Mac 上发现", "Found on this Mac")),
           h('div', { class: 'card' }, rows),
-          h('p', { class: 'help' }, tr("名称仅用于显示，修改名称不会移动本地目录。", "Names are only labels — click one to rename it. Nothing on disk moves.")))
+          h('p', { class: 'help' }, tr("名称仅用于显示，修改名称不会移动本地目录。", "Names are only labels — click one to rename it. Nothing on disk moves.")),
+          h('p', { class: 'help warn' }, tf("最多添加 {0} 个账号。", "You can add up to {0} accounts.", MAX_ACCOUNTS)))
         : h('p', { class: 'help' }, tr("未发现 Claude 目录，可以先进入再添加账号。", "No Claude profiles here yet. Start empty and add one.")),
       h('div', { class: 'notice' }, h('span', { class: 'status' }, accelCaps(hotkey).map(c => h('span', { class: 'keycap small' }, c))),
         h('span', {}, tr("可在任意应用中调出 CASE，可在设置中修改。", "brings CASE up from any app. Change it in Settings.")))),
@@ -750,6 +774,7 @@ async function pullStatus () {
       return { ...a, ...s }
     })
     if (changed && S.view === 'list' && !S.panel) renderRows()
+    if (changed && (S.view === 'usage' || S.view === 'account')) paintQuota()
   } finally {
     pulling = false
   }
@@ -791,6 +816,9 @@ document.addEventListener('keydown', e => {
 // ---------------------------------------------------------------- start ---
 
 api.onAccountsChanged(() => refresh())
+api.onLaunchStage(({ id, stage }) => {
+  if (launching && id === activeLaunchId) toast(launchStageText(stage), stage === 'error' ? 'error' : 'info')
+})
 api.onHealthUpdate(d => { setHealth(d); if (S.view === 'health') viewHealth() })
 api.onShowHealth(() => show('health'))
 api.onNewAccount(() => show('account', { isNew: true }))

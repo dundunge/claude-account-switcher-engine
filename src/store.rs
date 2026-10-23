@@ -176,6 +176,11 @@ pub fn backup_root() -> PathBuf {
 // thread pool, so two of them interleaving would drop one change.
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// One lock for operations whose filesystem move and accounts.json update must
+/// agree.  The sync launcher, archive, restore and delete paths all take this
+/// before touching either side of that boundary.
+pub static OPERATION_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn load() -> Config {
     load_from(&conf()).unwrap_or_default()
 }
@@ -214,20 +219,17 @@ fn save_to(file: &Path, c: &Config) -> std::io::Result<()> {
 
 /// Read, change and write back, with nobody else doing the same in between.
 ///
-/// A file that exists but cannot be read right now — locked, unreadable, a disk
-/// error — is left exactly as it is: the change is made to an empty config and
-/// thrown away, rather than saved over a config it never saw.
-pub fn edit<R>(f: impl FnOnce(&mut Config) -> R) -> R {
+/// A read or write failure is returned to the caller.  In particular, a full
+/// disk cannot be reported as a successful account/archive change: the old
+/// accounts.json remains the source of truth and the filesystem operation can
+/// be rolled back by its caller.
+pub fn edit<R>(f: impl FnOnce(&mut Config) -> R) -> Result<R, String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let file = conf();
-    match load_from(&file) {
-        Ok(mut c) => {
-            let r = f(&mut c);
-            let _ = save_to(&file, &c);
-            r
-        }
-        Err(_) => f(&mut Config::default()),
-    }
+    let mut c = load_from(&file).map_err(|e| format!("Could not read CASE configuration: {e}"))?;
+    let r = f(&mut c);
+    save_to(&file, &c).map_err(|e| format!("Could not save CASE configuration: {e}"))?;
+    Ok(r)
 }
 
 /// The account list, migrating anything older first. None means first run.
@@ -237,7 +239,7 @@ pub fn accounts() -> Option<Vec<Account>> {
         return c.accounts;
     }
     let legacy = read_tsv(&conf_dir().join("accounts.tsv"))?;
-    edit(|c| c.accounts = Some(legacy.clone()));
+    let _ = edit(|c| c.accounts = Some(legacy.clone()));
     Some(legacy)
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "case"
-version = "4.2.0"
+version = "4.2.1"
 description = "Independent CASE edition with local session sync and bilingual usage controls"
 license = "MIT"
 repository = "https://github.com/dundunge/claude-account-switcher-engine"

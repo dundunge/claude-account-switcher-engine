@@ -37,7 +37,7 @@ jobs:
           cargo fmt --check
           cargo clippy --all-targets -- -D warnings
           cargo test
-          node --test tests/i18n.test.cjs
+          node --test tests/*.test.cjs
           python3 -m unittest discover -s tests/python -q
       - name: Build and verify macOS universal bundle
         shell: bash

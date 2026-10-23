@@ -86,6 +86,76 @@ class CaseBridgeTests(unittest.TestCase):
         self.assertEqual(len(value['partitions']), 5)
         self.assertFalse(bootstrap)
 
+    def test_default_claude_profile_name_is_allowed(self):
+        renamed = self.parent / 'Claude'
+        self.target.rename(renamed)
+        self.accounts[0]['dir'] = str(renamed)
+        self.target = renamed
+        self.save_accounts()
+        value, bootstrap, initialized = bridge.discover(self.hook, self.target, s)
+        self.assertTrue(bootstrap)
+        self.assertEqual(initialized, 0)
+        self.assertEqual(len(value['partitions']), 2)
+
+    def test_ninth_account_is_rejected_before_sync(self):
+        for i in range(2, 9):
+            directory = self.parent / ('Claude-Pro-' + str(i))
+            directory.mkdir()
+            self.accounts.append({'id': str(__import__('uuid').uuid4()),
+                                  'name': 'Pro ' + str(i), 'dir': str(directory)})
+        self.save_accounts()
+        with self.assertRaisesRegex(bridge.BridgeError, 'CASE_ACCOUNTS_REQUIRED'):
+            bridge.discover(self.hook, self.target, s)
+
+    def test_pinned_bridge_hash_blocks_mixed_release(self):
+        with self.assertRaisesRegex(bridge.BridgeError, 'BRIDGE_HASH_MISMATCH'):
+            bridge.check_bridge_hash({**self.hook, 'bridge_sha256': '0' * 64})
+
+    def test_repair_uses_the_transaction_engine_and_preserves_permissions(self):
+        self.put()
+        self.init_profile(0)
+        self.init_profile(1, base.B, base.OB)
+        orphan = {
+            'localId': 'local_' + base.SID,
+            'cliSessionId': base.CLI,
+            'cwd': '/offline/project',
+            'createdAt': 1790000000000,
+            'lastActivityAt': 1790000001000,
+            'title': 'Recovered',
+            'model': 'claude-test',
+        }
+        real = s.apply
+        with mock.patch.object(s, 'assert_stopped'), mock.patch.object(
+                s, 'apply', side_effect=lambda c, p, **_: real(c, p, guard=lambda: None)):
+            result = bridge.run_repair(self.hook, self.target, s, orphan)
+        self.assertEqual(result['status'], 'completed')
+        indexes = (
+            self.init_profile(0),
+            self.init_profile(1, base.B, base.OB),
+            self.index / base.A / base.OA,
+            self.index / base.B / base.OB,
+        )
+        for index in indexes:
+            entry = index / base.NAME
+            self.assertTrue(entry.is_file())
+            self.assertNotIn('permissionMode', json.loads(entry.read_text()))
+
+    def test_repair_refuses_an_explicit_deletion_marker(self):
+        self.put()
+        namespace = self.init_profile(0)
+        self.init_profile(1, base.B, base.OB)
+        (namespace / ('deleted_' + base.SID)).write_text(str(1790000002000))
+        orphan = {
+            'localId': 'local_' + base.SID,
+            'cliSessionId': base.CLI,
+            'cwd': '/offline/project',
+            'createdAt': 1790000000000,
+            'lastActivityAt': 1790000001000,
+        }
+        with mock.patch.object(s, 'assert_stopped'):
+            with self.assertRaisesRegex(s.SyncError, 'SESSION_MARKED_DELETED'):
+                bridge.run_repair(self.hook, self.target, s, orphan)
+
     def test_unknown_target_and_ambiguous_organization_do_not_request_exit(self):
         self.init_profile(0); self.init_profile(0, base.A, base.OB)
         with mock.patch.object(bridge, 'graceful_close') as close:
