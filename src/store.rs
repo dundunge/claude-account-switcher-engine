@@ -97,6 +97,7 @@ pub struct Archived {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
+    pub language: String,
     pub hotkey: String,
     pub hotkey_enabled: bool,
     pub menu_bar: bool,
@@ -112,6 +113,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: "zh-CN".into(),
             hotkey: platform::DEFAULT_HOTKEY.into(),
             hotkey_enabled: true,
             menu_bar: true,
@@ -374,6 +376,24 @@ mod tests {
         let file = dir.join("accounts.json");
         save_to(&file, &Config::default()).unwrap();
         assert!(load_from(&file).unwrap().accounts.is_none());
+    }
+
+    #[test]
+    fn language_roundtrips_without_changing_account_data() {
+        let dir = scratch();
+        let file = dir.join("accounts.json");
+        std::fs::write(
+            &file,
+            r#"{"accounts":[{"id":"test","name":"中文 Work","dir":"/profile"}]}"#,
+        )
+        .unwrap();
+        let mut config = load_from(&file).unwrap();
+        assert_eq!(config.settings.language, "zh-CN");
+        config.settings.language = "en".into();
+        save_to(&file, &config).unwrap();
+        let saved = load_from(&file).unwrap();
+        assert_eq!(saved.settings.language, "en");
+        assert_eq!(saved.accounts()[0].name, "中文 Work");
     }
 
     #[test]

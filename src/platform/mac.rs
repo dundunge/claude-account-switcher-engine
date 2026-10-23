@@ -30,7 +30,11 @@ pub fn claude_installed() -> bool {
 }
 
 pub fn claude_hint() -> String {
-    "Claude is not installed in /Applications — accounts cannot be launched.".into()
+    crate::locale::tr(
+        "未在 /Applications 中找到 Claude，暂时无法打开账号。",
+        "Claude is not installed in /Applications. Accounts cannot be opened.",
+    )
+    .into()
 }
 
 /// Open Claude on a profile.
@@ -69,15 +73,21 @@ fn prefixed(prefix: &str, path: &Path) -> OsString {
     s
 }
 
-/// Front the instance already holding a profile. macOS cannot raise one instance
-/// of a bundle, so this fronts whichever Claude the window server picks — hence
-/// the ignored argument, which win.rs does use.
-pub fn activate_profile(_dir: &Path) {
-    run(
-        "/usr/bin/osascript",
-        &["-e", "tell application \"Claude\" to activate"],
-        secs(8),
-    );
+/// Front the main process holding this profile, identified by its open files.
+pub fn activate_profile(dir: &Path) {
+    if let Some(pid) = pids_for_profile(dir).first() {
+        run(
+            "/usr/bin/osascript",
+            &[
+                "-l",
+                "JavaScript",
+                "-e",
+                "ObjC.import('AppKit'); function run(args) { var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(args[0])); app.activateWithOptions(2); }",
+                pid,
+            ],
+            secs(8),
+        );
+    }
 }
 
 // ---------------------------------------------------------------- processes ---
@@ -160,10 +170,27 @@ fn pids_for_profile(dir: &Path) -> Vec<String> {
 pub fn quit_profile(dir: &Path) -> Result<usize, String> {
     let pids = pids_for_profile(dir);
     if pids.is_empty() {
-        return Err("Could not find the process for that account.".into());
+        return Err(crate::locale::tr(
+            "未找到该账号的 Claude 进程。",
+            "Could not find the Claude process for this account.",
+        )
+        .into());
     }
     for pid in &pids {
-        run("/bin/kill", &["-TERM", pid], secs(4));
+        let result = run(
+            "/usr/bin/osascript",
+            &[
+                "-l",
+                "JavaScript",
+                "-e",
+                "ObjC.import('AppKit'); function run(args) { var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(Number(args[0])); if (!app.terminate) throw new Error('Quit request declined'); }",
+                pid,
+            ],
+            secs(8),
+        );
+        if !result.ok {
+            return Err(crate::locale::tr("Claude 未接受正常退出请求，请在 Claude 内完成任务后退出。", "Claude did not accept the quit request. Finish your work and quit normally in Claude.").into());
+        }
     }
     Ok(pids.len())
 }
@@ -218,9 +245,15 @@ pub struct ShortcutStatus {
 pub fn shortcut_status() -> ShortcutStatus {
     ShortcutStatus {
         present: is_pinned(),
-        blurb: "Keep this in your Dock so an account is always one click away.",
-        cta: "Keep in Dock",
-        tip: "Add to the Dock permanently (restarts the Dock)",
+        blurb: crate::locale::tr(
+            "固定到程序坞，方便随时打开账号列表。",
+            "Keep CASE in the Dock to open the account list at any time.",
+        ),
+        cta: crate::locale::tr("保留在程序坞", "Keep in Dock"),
+        tip: crate::locale::tr(
+            "固定到程序坞（会重启程序坞）",
+            "Keep in the Dock permanently (restarts the Dock)",
+        ),
     }
 }
 
@@ -252,7 +285,9 @@ pub fn shortcut_create() -> Result<bool, String> {
         secs(8),
     );
     if !w.ok {
-        return Err("Could not write Dock preferences.".into());
+        return Err(
+            crate::locale::tr("无法写入程序坞设置。", "Could not write Dock preferences.").into(),
+        );
     }
     run("/usr/bin/killall", &["Dock"], secs(8));
     // The Dock takes a moment to come back and rewrite its plist.
@@ -260,7 +295,11 @@ pub fn shortcut_create() -> Result<bool, String> {
     if is_pinned() {
         Ok(false)
     } else {
-        Err("The Dock did not take the shortcut.".into())
+        Err(crate::locale::tr(
+            "程序坞未接受快捷方式。",
+            "The Dock did not accept the shortcut.",
+        )
+        .into())
     }
 }
 
@@ -382,8 +421,16 @@ pub fn find_fresh(unpacked: &Path) -> Result<PathBuf, String> {
         .ok_or("The download did not contain an app.")?;
     match std::fs::read_to_string(fresh.join("Contents/Info.plist")) {
         Ok(plist) if plist.contains("local.launcher.case") => Ok(fresh),
-        Ok(_) => Err("The download is not CASE, so it was not installed.".into()),
-        Err(_) => Err("The download does not look like a macOS app bundle.".into()),
+        Ok(_) => Err(crate::locale::tr(
+            "下载内容不是 CASE，已停止安装。",
+            "The download is not CASE. Installation stopped.",
+        )
+        .into()),
+        Err(_) => Err(crate::locale::tr(
+            "下载内容不是有效的 macOS 应用。",
+            "The download is not a valid macOS app bundle.",
+        )
+        .into()),
     }
 }
 

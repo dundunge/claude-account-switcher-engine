@@ -8,7 +8,7 @@ const api = window.api
 const IS_WIN = api.platform === 'win32'
 document.documentElement.classList.toggle('win', IS_WIN)
 
-const FILE_MANAGER = IS_WIN ? 'Explorer' : 'Finder'
+const fileManager = () => IS_WIN ? tr("文件资源管理器", "Explorer") : tr("访达", "Finder")
 
 /** Whether the platform's command key is down: Ctrl on Windows, Command on a Mac. */
 const modDown = e => (IS_WIN ? e.ctrlKey : e.metaKey)
@@ -144,42 +144,45 @@ function avatar (a, size = 36, live = false) {
 
 // ----------------------------------------------------------------- usage ---
 
-// Which limit bites first is what matters when picking an account, so the
-// figure shown is whichever of the two is further along.
-const usagePeak = u => (u ? Math.max(u.fh, u.sd) : 0)
 const level = p => (p >= 90 ? 'danger' : p >= 75 ? 'warn' : 'accent')
+const usageDisplayKey = u => u ? [u.at, u.fh, u.sd, u.source, u.fhResetAt, u.sdResetAt, Math.floor(Math.max(0, u.age) / 60000)].join('/') : ''
+const usageIsOld = u => u && u.age > 10 * 60000
+const usageAge = u => u ? (u.source === 'official'
+  ? tf('{0}查询 · 官方', 'Official · {0}', fmtAgo(u.at))
+  : tf('{0}采样 · 本地', 'Local · {0}', fmtAgo(u.at))) + (usageIsOld(u) ? tr(' · 旧数据', ' · stale') : '') : tr('暂无额度记录', 'No usage data')
 
 function usageTip (u) {
-  const when = u.age < 90000 ? 'just now' : fmtAgo(u.at)
-  return `Plan usage as of ${when}: ${u.fh}% of the 5-hour limit, ${u.sd}% of the weekly one.`
+  if (!u) return tr("暂无额度记录，待 Claude 生成本地采样。", "No quota sample has been recorded by Claude yet.")
+  return tf('5 小时已用 {0}；周额度已用 {1}。{2}。百分比表示已使用的额度。', '5-hour usage: {0}; weekly usage: {1}. {2}. Percentages show used quota.',
+    Number.isFinite(u.fh) ? `${u.fh}%` : tr('未知', 'unknown'), Number.isFinite(u.sd) ? `${u.sd}%` : tr('未知', 'unknown'), usageAge(u))
 }
 
-/** Two rings: the five-hour limit outside, the weekly one inside. */
-function usageRing (u) {
-  const peak = usagePeak(u)
-  const s = svg('svg', { width: 28, height: 28, viewBox: '0 0 28 28', 'aria-hidden': 'true' })
-  for (const [r, v] of [[12, u ? u.fh : 0], [7, u ? u.sd : 0]]) {
-    const c = 2 * Math.PI * r
-    s.append(svg('circle', { cx: 14, cy: 14, r, fill: 'none', class: 'ring-track', 'stroke-width': 3 }))
-    if (v > 0) {
-      s.append(svg('circle', { cx: 14, cy: 14, r, fill: 'none', class: `ring-${level(v)}`, 'stroke-width': 3, 'stroke-linecap': 'round', 'stroke-dasharray': `${(c * v) / 100} ${c}` }))
-    }
-  }
-  return h('span', {
-    class: 'usage',
-    role: 'img',
-    title: u ? usageTip(u) : null,
-    'aria-label': u ? usageTip(u) : 'No plan usage recorded yet'
-  }, s, h('span', { class: `pct ${peak >= 75 ? level(peak) : ''}` }, u ? `${peak}%` : '—'))
+function quotaLine (label, value) {
+  const known = Number.isFinite(value)
+  const tone = known && value >= 75 ? level(value) : ''
+  return h('span', { class: 'quota-line' },
+    h('span', { class: 'quota-top' }, h('span', {}, label),
+      h('b', { class: tone }, known ? tf("已用 {0}%", "{0}% used", value) : tr("未获取", "Unknown"))),
+    h('span', { class: `bar ${tone}`, role: 'progressbar', 'aria-label': tf("{0}已用", "{0} used", label),
+      'aria-valuenow': known ? value : null, 'aria-valuemin': 0, 'aria-valuemax': 100,
+      'aria-valuetext': known ? tf("已用 {0}%，剩余 {1}%", "{0}% used, {1}% remaining", value, 100 - value) : tr("未获取", "Unknown") },
+    h('span', { style: { width: `${known ? value : 0}%` } })))
+}
+
+/** Explicit labels and values: neither limit is hidden behind a combined peak. */
+function usageSummary (u) {
+  return h('span', { class: `usage-summary${usageIsOld(u) ? ' old' : ''}`, title: usageTip(u) },
+    quotaLine(tr("5 小时", "5 hours"), u?.fh), quotaLine(tr("周额度", "Weekly"), u?.sd),
+    h('span', { class: 'usage-age' }, usageAge(u)))
 }
 
 // ------------------------------------------------------------ formatting ---
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+const plural = (n, word) => I18N.language === 'en' ? `${n} ${word}${n === 1 ? '' : 's'}` : `${n} ${{ session: tr("条会话", "sessions"), 'saved session': tr("条已保存会话", "saved sessions"), account: tr("个账号", "accounts"), profile: tr("个目录", "profiles"), 'failed save': tr("次保存失败", "failed saves"), 'index backup': tr("份索引备份", "index backups") }[word] || word}`
 
 /** Decimal units, to match what Finder reports for the same folder. */
 function fmtBytes (bytes) {
-  if (!Number.isFinite(bytes)) return 'unknown size'
+  if (!Number.isFinite(bytes)) return tr("大小未知", "unknown size")
   const units = ['bytes', 'KB', 'MB', 'GB', 'TB']
   let n = bytes
   let i = 0
@@ -191,17 +194,17 @@ function fmtBytes (bytes) {
 function fmtAgo (ms) {
   const mins = (Date.now() - ms) / 60000
   if (!(mins >= 0)) return ''
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${Math.round(mins)} min ago`
-  if (mins < 60 * 24) return `${Math.round(mins / 60)} h ago`
-  if (mins < 60 * 24 * 7) return `${Math.round(mins / 1440)} d ago`
-  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  if (mins < 1) return tr("刚刚", "just now")
+  if (mins < 60) return tf("{0} 分钟前", "{0} min ago", Math.round(mins))
+  if (mins < 60 * 24) return tf("{0} 小时前", "{0} h ago", Math.round(mins / 60))
+  if (mins < 60 * 24 * 7) return tf("{0} 天前", "{0} d ago", Math.round(mins / 1440))
+  return new Date(ms).toLocaleDateString(I18N.language, { month: 'short', day: 'numeric' })
 }
 
 function fmtWhen (ms) {
   const d = new Date(ms)
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ', ' +
-    d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+  return d.toLocaleDateString(I18N.language, { month: 'short', day: 'numeric' }) + ', ' +
+    d.toLocaleTimeString(I18N.language, { hour: '2-digit', minute: '2-digit' })
 }
 
 // ------------------------------------------------------------- controls ---
@@ -314,3 +317,8 @@ function accelFromEvent (e) {
   if (!key) return null
   return { accel: [...mods, key].join('+'), bare: mods.length === 0 }
 }
+
+api.onLanguageChanged(language => {
+  I18N.set(language)
+  document.dispatchEvent(new Event('case-language-changed'))
+})

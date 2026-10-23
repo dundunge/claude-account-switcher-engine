@@ -616,7 +616,11 @@ pub fn rebuild(account: &Account, orphan: &Orphan) -> Result<PathBuf, String> {
     )?;
     let dest = ns.dir.join(format!("{}.json", orphan.local_id));
     if dest.exists() {
-        return Err("An entry for that session already exists.".into());
+        return Err(crate::locale::tr(
+            "此会话索引已存在。",
+            "That session index entry already exists.",
+        )
+        .into());
     }
     let home = dirs::home_dir()
         .unwrap_or_default()

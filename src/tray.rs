@@ -24,7 +24,10 @@ pub fn enable(app: &AppHandle) {
         let _ = TrayIconBuilder::with_id(ID)
             .icon(icon)
             .icon_as_template(template)
-            .tooltip("CASE — Claude Account Switcher Engine")
+            .tooltip(crate::locale::tr(
+                "CASE · Claude 多账号管理",
+                "CASE · Claude Account Switcher",
+            ))
             .show_menu_on_left_click(true)
             // Rebuilt as the pointer arrives, so running state is current when
             // the menu opens rather than as of the last change. The menu shows on
@@ -129,7 +132,7 @@ fn menu(
         menu.append(&MenuItem::with_id(
             app,
             "none",
-            "No accounts yet",
+            crate::locale::tr("暂无账号", "No accounts yet"),
             false,
             None::<&str>,
         )?)?;
@@ -141,26 +144,29 @@ fn menu(
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     let health = if issues > 0 {
-        format!("Session health ({issues})")
+        crate::l10n!("会话状态（{issues}）", "Session health ({issues})")
     } else {
-        "Session health".into()
+        crate::locale::tr("会话状态", "Session health").into()
     };
     menu.append(&item("health", &health)?)?;
-    menu.append(&item("new", "New account…")?)?;
+    menu.append(&item(
+        "new",
+        crate::locale::tr("添加账号…", "New account…"),
+    )?)?;
     menu.append(&MenuItem::with_id(
         app,
         "settings",
-        "Settings…",
+        crate::locale::tr("设置…", "Settings…"),
         true,
         Some("CmdOrCtrl+,"),
     )?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&item("open", "Open CASE")?)?;
+    menu.append(&item("open", crate::locale::tr("打开 CASE", "Open CASE"))?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(
         app,
         "quit",
-        "Quit CASE",
+        crate::locale::tr("退出 CASE", "Quit CASE"),
         true,
         Some("CmdOrCtrl+Q"),
     )?)?;

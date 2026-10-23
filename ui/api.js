@@ -35,6 +35,8 @@ window.api = {
   claudeInstalled: () => invoke('app_claude_installed'),
   openSettings: section => invoke('settings_open', { section }),
   getSettings: () => invoke('settings_get'),
+  setLanguage: language => invoke('settings_set_language', { language }),
+  refreshUsage: (id, official = true) => invoke('usage_refresh', { id, official }),
   setHotkey: (hotkey, enabled) => invoke('settings_set_hotkey', { hotkey, enabled }),
   setPresentation: (menuBar, hideDock) => invoke('settings_set_presentation', { menuBar, hideDock }),
   setSorting: sortByRecent => invoke('settings_set_sorting', { sortByRecent }),
@@ -56,6 +58,7 @@ window.api = {
   onShowHealth: cb => on('health:show', () => cb()),
   onNewAccount: cb => on('account:new', () => cb()),
   onSettingsSection: cb => on('settings:section', cb),
+  onLanguageChanged: cb => on('language:changed', cb),
   onUpdateAvailable: cb => on('update:available', cb),
   // An install can be attempted more than once, and each attempt's callback
   // writes into a card that may be gone by the next — hence the remover.

@@ -1,131 +1,70 @@
-name: Release
+name: Release independent edition
 
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
-# Nothing here needs write access except the job that publishes, so only that
-# one gets it. The build legs run with the default read-only token.
 permissions:
   contents: read
 
+env:
+  CASE_LOCAL_SYNC_BUILD: '1'
+
 jobs:
-  # One leg per platform: a macOS bundle can only be signed on a Mac, and the
-  # Windows icon and version resources are compiled in with the MSVC toolchain.
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, tag: mac }
-          - { os: windows-latest, tag: win }
-    runs-on: ${{ matrix.os }}
+    if: github.repository == 'dundunge/claude-account-switcher-engine'
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.tag == 'mac' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
-
-      # A mistagged release must not reach anyone.
-      - name: Tag matches Cargo.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - name: Verify version and source
         shell: bash
         run: |
-          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          echo "version: $VER"
-          echo "VERSION=$VER" >> "$GITHUB_ENV"
-          if [[ "$GITHUB_REF_NAME" == v* && "$GITHUB_REF_NAME" != "v$VER" ]]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $VER"; exit 1
-          fi
-
-      - run: cargo test
-
-      # ---------------------------------------------------------------- macOS ---
-
-      - name: Build (macOS)
-        if: runner.os == 'macOS'
+          set -euo pipefail
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+          node --test tests/i18n.test.cjs
+          python3 -m unittest discover -s tests/python -q
+      - name: Build and verify macOS universal bundle
+        shell: bash
         run: |
           set -euo pipefail
           cargo install tauri-cli --version '^2' --locked
-          # Universal, so there is a single download whatever Mac someone is
-          # on. tauri.conf.json asks for an ad-hoc signature.
-          cargo tauri build --bundles app --target universal-apple-darwin
-          mkdir -p out
+          cargo tauri build --bundles app --target universal-apple-darwin --ci
           APP=target/universal-apple-darwin/release/bundle/macos/CASE.app
-          ZIP="CASE-$VERSION-mac-universal.zip"
-          # ditto rather than zip: it is the only archiver here that keeps the
-          # bundle's signature metadata, and what the updater unpacks with.
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "out/$ZIP"
-          ( cd out && shasum -a 256 "$ZIP" > "$ZIP.sha256" )
-
-      - name: Verify what we are about to publish (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          set -euo pipefail
-          ZIP=$(ls out/*.zip)
-          # The checksum file names the archive without a path, so whoever
-          # downloads both into one folder can just run `shasum -c`.
-          ( cd out && shasum -a 256 -c "$(basename "$ZIP").sha256" )
-          ditto -x -k "$ZIP" /tmp/verify
-          APP=/tmp/verify/CASE.app
-          test -d "$APP" || { echo "::error::no app in the archive"; exit 1; }
           codesign --verify --deep --strict "$APP"
-          PLIST="$APP/Contents/Info.plist"
-          BUNDLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")
-          VER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$PLIST")
-          echo "bundle: $BUNDLE  version: $VER"
-          test "$BUNDLE" = "local.launcher.case" || { echo "::error::wrong bundle id"; exit 1; }
-          test "$VER" = "$VERSION" || { echo "::error::version mismatch"; exit 1; }
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist")" = 'local.launcher.case'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
           lipo -archs "$APP/Contents/MacOS/CASE"
-
-      # -------------------------------------------------------------- Windows ---
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          cargo build --release
-          # One exe, in a folder of its own inside the zip: the updater looks
-          # for a directory holding CASE.exe.
-          New-Item -ItemType Directory -Force stage/CASE, out | Out-Null
-          Copy-Item target/release/CASE.exe stage/CASE/
-          $zip = "CASE-$env:VERSION-win-x64.zip"
-          Compress-Archive -Path stage/CASE -DestinationPath "out/$zip"
-          $hash = (Get-FileHash "out/$zip" -Algorithm SHA256).Hash.ToLower()
-          # The format `shasum -c` reads, with no BOM and no CRLF.
-          [IO.File]::WriteAllText("$PWD/out/$zip.sha256", "$hash  $zip`n")
-
-      - name: Verify what we are about to publish (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $zip = (Get-ChildItem out/*.zip)[0]
-          $want = (Get-Content "$($zip.FullName).sha256").Split(' ')[0]
-          $got = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
-          if ($got -ne $want) { throw "checksum mismatch: $got vs $want" }
-          $out = Join-Path $env:RUNNER_TEMP 'verify'
-          Expand-Archive $zip.FullName -DestinationPath $out -Force
-          $exe = Join-Path $out 'CASE\CASE.exe'
-          if (!(Test-Path $exe)) { throw 'no CASE\CASE.exe in the archive' }
-          # What the updater's identity check looks for.
-          if (!(Select-String -Path $exe -Pattern 'local.launcher.case' -SimpleMatch -Quiet)) { throw 'the exe does not carry the bundle id' }
-          $ver = (Get-Item $exe).VersionInfo.ProductVersion
-          Write-Host "version: $ver"
-          if (-not $ver.StartsWith($env:VERSION)) { throw "version mismatch: $ver vs $env:VERSION" }
-
+          mkdir -p stage/local-sync out
+          ditto "$APP" stage/CASE.app
+          cp -R engine tools docs stage/local-sync/
+          cp README.md README.en.md NOTICE.md LICENSE stage/
+          ZIP="CASE-$VERSION-mac-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent stage/CASE.app "out/$ZIP"
+          (cd out && shasum -a 256 "$ZIP" > "$ZIP.sha256" && shasum -a 256 -c "$ZIP.sha256")
+          tar -czf "out/CASE-$VERSION-local-sync-source.tar.gz" -C stage local-sync README.md README.en.md NOTICE.md LICENSE
+          (cd out && shasum -a 256 "CASE-$VERSION-local-sync-source.tar.gz" > "CASE-$VERSION-local-sync-source.tar.gz.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.tag }}
-          path: out/*.zip*
+          name: independent-dist
+          path: out/*
           if-no-files-found: error
 
-  # Both builds go into one release, so the updater finds its own platform's
-  # asset there whichever machine asked.
   publish:
     needs: build
     runs-on: ubuntu-latest
@@ -133,68 +72,17 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0        # release notes are generated from history
-
       - uses: actions/download-artifact@v4
         with:
+          name: independent-dist
           path: dist
-          merge-multiple: true
-
-      - name: Publish
+      - name: Publish to our repository
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
           set -euo pipefail
-          TAG=${GITHUB_REF_NAME}
-          if [ "$TAG" = "main" ]; then TAG="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"; fi
-
-          ls -la dist
-
-          # Neither build is signed, so each platform stops a first download in
-          # its own way. Say so where people will read it, not only in the README.
-          cat > /tmp/notes.md <<'EOF'
-          ### Install — macOS
-
-          1. Download `CASE-*-mac-universal.zip` below and unzip it.
-          2. Move `CASE.app` to `~/Applications`.
-          3. **First launch only**, clear the download quarantine:
-
-              ```bash
-              xattr -dr com.apple.quarantine ~/Applications/CASE.app
-              ```
-
-          Step 3 is needed because this build is ad-hoc signed rather than
-          notarised — notarising requires a paid Apple Developer account. Without
-          it macOS reports the app as damaged.
-
-          ```bash
-          shasum -a 256 -c CASE-*-mac-universal.zip.sha256
-          ```
-
-          ### Install — Windows
-
-          1. Download `CASE-*-win-x64.zip` below, then **right-click it →
-             Properties → Unblock** *before* extracting. The mark-of-the-web
-             propagates to everything inside, and SmartScreen will otherwise
-             block the exe.
-          2. Extract the `CASE` folder to `%LOCALAPPDATA%\Programs\CASE`.
-          3. Run `CASE.exe`, then press **Add to Start menu** in the app — that
-             shortcut is also what lets Windows show notifications.
-
-          ```powershell
-          Get-FileHash CASE-*-win-x64.zip -Algorithm SHA256
-          ```
-
-          Updates installed from inside the app need none of this on either
-          platform: CASE downloads them itself, and checks them against the
-          checksums published here.
-
-          ---
-          EOF
-
-          gh release create "$TAG" \
-            dist/*.zip dist/*.zip.sha256 \
-            --title "$TAG" \
-            --notes-file /tmp/notes.md \
-            --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file docs/RELEASE-NOTES.md

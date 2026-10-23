@@ -1,9 +1,9 @@
 [package]
 name = "case"
-version = "4.1.0"
-description = "Claude Account Switcher Engine — run multiple Claude Desktop accounts side by side"
+version = "4.2.0"
+description = "Independent CASE edition with local session sync and bilingual usage controls"
 license = "MIT"
-repository = "https://github.com/pstarostka/claude-account-switcher-engine"
+repository = "https://github.com/dundunge/claude-account-switcher-engine"
 edition = "2024"
 publish = false
 

@@ -12,6 +12,8 @@
 mod archive;
 mod chrome;
 mod health;
+mod local_sync;
+mod locale;
 mod platform;
 mod store;
 mod tray;
@@ -222,6 +224,12 @@ fn touch(id: &str) {
 }
 
 fn launch_account(a: &Account) -> Value {
+    let Ok(_launch) = local_sync::LAUNCH_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一次账号切换正在进行，请稍后重试。",
+            "Another account switch is in progress. Try again shortly.",
+        ));
+    };
     touch(&a.id);
     if platform::is_running(&a.dir) {
         // Two instances on one profile corrupt its LevelDB stores, so this fronts
@@ -230,13 +238,18 @@ fn launch_account(a: &Account) -> Value {
         open_paired_chrome(a);
         return json!({ "ok": true, "alreadyRunning": true });
     }
+    let sync = match local_sync::before_launch(&a.dir) {
+        Ok(outcome) => outcome,
+        Err(message) => return error(&message),
+    };
     // Snapshot the session index before handing control to Claude. This is the
     // cheap insurance against the failure mode health.rs exists to catch.
     let _ = health::backup_index(a, &store::backup_root());
     let _ = std::fs::create_dir_all(&a.dir);
     let launched = platform::launch_claude(&a.dir, is_default(a));
     open_paired_chrome(a);
-    json!({ "ok": launched.is_ok(), "error": launched.err().flatten(), "alreadyRunning": false })
+    json!({ "ok": launched.is_ok(), "error": launched.err().flatten(), "alreadyRunning": false,
+            "syncBootstrap": sync.bootstrap })
 }
 
 /// Bring the account's browser context along, if one is paired and enabled.
@@ -352,18 +365,29 @@ fn accounts_adopt(app: AppHandle, picked: Vec<Picked>) -> Vec<Value> {
 fn accounts_add(app: AppHandle, name: String) -> Value {
     let name = name.trim().to_owned();
     if name.is_empty() {
-        return error("Name cannot be empty.");
+        return error(crate::locale::tr(
+            "账号名称不能为空。",
+            "The account name cannot be empty.",
+        ));
     }
     let added = store::edit(|c| {
         if c.accounts()
             .iter()
             .any(|a| a.name.to_lowercase() == name.to_lowercase())
         {
-            return Err("An account with that name already exists.".to_owned());
+            return Err(crate::locale::tr(
+                "已存在同名账号。",
+                "An account with that name already exists.",
+            )
+            .to_owned());
         }
         let dir = unique_dir(&name);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("Could not create the profile folder: {e}"))?;
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            crate::l10n!(
+                "无法创建账号目录：{e}",
+                "Could not create the profile folder: {e}"
+            )
+        })?;
         c.accounts_mut().push(store::new_account(&name, dir));
         Ok(c.accounts().to_vec())
     });
@@ -389,20 +413,26 @@ fn accounts_update(
 ) -> Value {
     let name = name.trim().to_owned();
     if name.is_empty() {
-        return error("Name cannot be empty.");
+        return error(crate::locale::tr(
+            "账号名称不能为空。",
+            "The account name cannot be empty.",
+        ));
     }
     let updated = store::edit(|c| {
         if c.accounts()
             .iter()
             .any(|x| x.id != id && x.name.to_lowercase() == name.to_lowercase())
         {
-            return Err("An account with that name already exists.");
+            return Err(crate::locale::tr(
+                "已存在同名账号。",
+                "An account with that name already exists.",
+            ));
         }
         let a = c
             .accounts_mut()
             .iter_mut()
             .find(|x| x.id == id)
-            .ok_or("Account not found.")?;
+            .ok_or(crate::locale::tr("未找到账号。", "Account not found."))?;
         a.name = name;
         // Bounded rather than validated against a list: a ZWJ sequence is many
         // code points, and there is no reason to refuse one the picker does not offer.
@@ -439,19 +469,26 @@ fn accounts_remove(
     confirm: Option<String>,
 ) -> Value {
     let Some(a) = find(&id) else {
-        return error("Account not found.");
+        return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
     if delete_data {
         if is_default(&a) {
-            return error(
-                "The default profile is Claude’s own data directory and cannot be deleted.",
-            );
+            return error(crate::locale::tr(
+                "Claude 默认数据目录不能删除。",
+                "The default Claude profile cannot be deleted.",
+            ));
         }
         if platform::is_running(&a.dir) {
-            return error("That account is open. Quit it first, then try again.");
+            return error(crate::locale::tr(
+                "此账号正在运行，请先正常退出 Claude 再试。",
+                "This account is open. Quit Claude normally before trying again.",
+            ));
         }
         if !confirmed(confirm.as_deref(), &a.name) {
-            return error("Type the account’s name to confirm the deletion.");
+            return error(crate::locale::tr(
+                "请输入账号名称以确认删除。",
+                "Type the account name to confirm deletion.",
+            ));
         }
         if let Err(e) = std::fs::remove_dir_all(&a.dir).or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -460,7 +497,10 @@ fn accounts_remove(
                 Err(e)
             }
         }) {
-            return error(format!("Could not delete the profile: {e}"));
+            return error(crate::l10n!(
+                "无法删除账号目录：{e}",
+                "Could not delete the profile: {e}"
+            ));
         }
     }
     let next = store::edit(|c| {
@@ -479,16 +519,20 @@ fn accounts_size(id: String) -> Value {
 #[tauri::command(async)]
 fn accounts_archive(app: AppHandle, id: String) -> Value {
     let Some(a) = find(&id) else {
-        return error("Account not found.");
+        return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
     if is_default(&a) {
-        return error(
-            "The default profile is Claude’s own data directory and cannot be moved aside.",
-        );
+        return error(crate::locale::tr(
+            "Claude 默认数据目录不能归档。",
+            "The default Claude profile cannot be archived.",
+        ));
     }
     // Renaming a directory out from under a running app is how you corrupt one.
     if platform::is_running(&a.dir) {
-        return error("That account is open. Quit it first, then try again.");
+        return error(crate::locale::tr(
+            "此账号正在运行，请先正常退出 Claude 再试。",
+            "This account is open. Quit Claude normally before trying again.",
+        ));
     }
     // No confirmation: archiving deletes nothing and restores in a click, and the
     // remove sheet already spelled out what it does.
@@ -513,7 +557,10 @@ fn accounts_archive(app: AppHandle, id: String) -> Value {
 #[tauri::command(async)]
 fn archive_restore(app: AppHandle, id: String) -> Value {
     let Some(r) = store::load().archived.into_iter().find(|x| x.id == id) else {
-        return error("That archive is no longer listed.");
+        return error(crate::locale::tr(
+            "此归档已不在列表中。",
+            "That archive is no longer listed.",
+        ));
     };
     let dir = match archive::restore(&r) {
         Ok(d) => d,
@@ -536,10 +583,16 @@ fn archive_restore(app: AppHandle, id: String) -> Value {
 #[tauri::command(async)]
 fn archive_delete(app: AppHandle, id: String, confirm: Option<String>) -> Value {
     let Some(r) = store::load().archived.into_iter().find(|x| x.id == id) else {
-        return error("That archive is no longer listed.");
+        return error(crate::locale::tr(
+            "此归档已不在列表中。",
+            "That archive is no longer listed.",
+        ));
     };
     if !confirmed(confirm.as_deref(), &r.name) {
-        return error("Type the account’s name to confirm the deletion.");
+        return error(crate::locale::tr(
+            "请输入账号名称以确认删除。",
+            "Type the account name to confirm deletion.",
+        ));
     }
     if let Err(e) = archive::destroy(&r) {
         return error(e);
@@ -556,7 +609,7 @@ fn archive_delete(app: AppHandle, id: String, confirm: Option<String>) -> Value 
 fn accounts_launch(id: String) -> Value {
     match find(&id) {
         Some(a) => launch_account(&a),
-        None => error("Account not found."),
+        None => error(crate::locale::tr("未找到账号。", "Account not found.")),
     }
 }
 
@@ -570,7 +623,7 @@ fn accounts_reveal(id: String) {
 #[tauri::command(async)]
 fn accounts_quit(id: String) -> Value {
     let Some(a) = find(&id) else {
-        return error("Account not found.");
+        return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
     match platform::quit_profile(&a.dir) {
         Ok(count) => json!({ "ok": true, "count": count }),
@@ -609,6 +662,7 @@ fn app_open_link(which: String) {
         "source" => base,
         "releases" => update::releases_page(),
         "licence" => format!("{base}/blob/main/LICENSE"),
+        "upstream" => "https://github.com/pstarostka/claude-account-switcher-engine".into(),
         _ => return,
     };
     platform::open_url(&url);
@@ -631,11 +685,55 @@ fn app_claude_installed() -> Value {
 fn settings_get() -> Value {
     let mut v = serde_json::to_value(store::settings()).unwrap_or_default();
     v["version"] = update::VERSION.into();
+    v["syncEdition"] = "CASE_LOCAL_SYNC_EDITION_V1".into();
     v["openAtLogin"] = platform::open_at_login().into();
     v["defaultHotkey"] = platform::DEFAULT_HOTKEY.into();
     v["dataDir"] = json!(store::conf_dir());
     v["backupsDir"] = json!(store::backup_root());
     v
+}
+
+#[tauri::command(async)]
+fn settings_set_language(app: AppHandle, language: String) -> Value {
+    if !matches!(language.as_str(), "en" | "zh-CN") {
+        return error(locale::tr(
+            "不支持这种界面语言。",
+            "Unsupported interface language.",
+        ));
+    }
+    store::edit(|c| c.settings.language = language.clone());
+    if store::settings().language != language {
+        return error(locale::tr(
+            "无法保存语言设置。",
+            "Could not save the language preference.",
+        ));
+    }
+    locale::set(&language);
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = locale::install(&handle);
+        tray::reload(&handle);
+        if let Some(window) = handle.get_webview_window("settings") {
+            let _ = window.set_title(locale::tr("CASE 设置", "CASE Settings"));
+        }
+    });
+    let _ = app.emit("language:changed", &language);
+    json!({ "ok": true, "language": language })
+}
+
+#[tauri::command(async)]
+fn usage_refresh(id: String, official: bool) -> Value {
+    let Some(account) = find(&id) else {
+        return error(locale::tr("未找到账号。", "Account not found."));
+    };
+    if !official {
+        usage::invalidate(&account.dir);
+        return json!({ "ok": true, "usage": usage::read(&account.dir), "localOnly": true });
+    }
+    match usage::refresh(&account.dir) {
+        Ok(value) => json!({ "ok": true, "usage": value }),
+        Err(code) => json!({ "ok": false, "code": code, "usage": usage::read(&account.dir) }),
+    }
 }
 
 #[tauri::command(async)]
@@ -727,7 +825,7 @@ fn chrome_pair(
             changed(&app);
             json!({ "accounts": stored_list(&accounts) })
         }
-        None => error("Account not found."),
+        None => error(crate::locale::tr("未找到账号。", "Account not found.")),
     }
 }
 
@@ -753,7 +851,7 @@ fn health_scan() -> health::Scan {
 #[tauri::command(async)]
 fn health_rebuild(account_id: String, orphan: health::Orphan) -> Value {
     let Some(a) = find(&account_id) else {
-        return error("Account not found.");
+        return error(crate::locale::tr("未找到账号。", "Account not found."));
     };
     match health::rebuild(&a, &orphan) {
         Ok(file) => json!({ "ok": true, "file": file }),
@@ -788,8 +886,19 @@ fn merged_check(res: &update::Check) -> Value {
 
 #[tauri::command(async)]
 fn update_install(app: AppHandle) -> Value {
+    // This edition's sync runtime is separate from its application bundle.
+    // Release instructions cover both parts until an atomic installer exists.
+    if option_env!("CASE_LOCAL_SYNC_BUILD") == Some("1") {
+        return error(crate::locale::tr(
+            "这是独立维护版，同步引擎单独安装。请按自有仓库的发行说明升级。",
+            "This independent edition uses a separate sync engine. Follow the instructions in our release before updating.",
+        ));
+    }
     let Some(info) = rt().last_update.clone().filter(|u| u.available) else {
-        return error("No update to install.");
+        return error(crate::locale::tr(
+            "没有可安装的更新。",
+            "No update is available to install.",
+        ));
     };
     let staged = match update::download(&info, &|p| {
         let _ = app.emit("update:progress", p);
@@ -841,8 +950,13 @@ fn register_hotkey(app: &AppHandle, accel: Option<&str>) -> Result<(), String> {
     }
     let Some(accel) = accel else { return Ok(()) };
     // Refused when the combination cannot be parsed or another app owns it.
-    gs.register(accel)
-        .map_err(|_| "That shortcut is already taken by another app.".to_owned())?;
+    gs.register(accel).map_err(|_| {
+        crate::locale::tr(
+            "快捷键已被占用或格式无效，请换一组。",
+            "That shortcut is taken or invalid. Choose another combination.",
+        )
+        .to_owned()
+    })?;
     rt().hotkey = Some(accel.to_owned());
     Ok(())
 }
@@ -910,11 +1024,14 @@ pub fn open_settings(app: &AppHandle, section: Option<&str>) {
     let start = serde_json::to_string(section.unwrap_or("general")).unwrap_or_default();
     let builder =
         WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("settings.html".into()))
-            .title("CASE Settings")
+            .title(crate::locale::tr("CASE 设置", "CASE Settings"))
             .inner_size(760.0, 540.0)
             .min_inner_size(640.0, 440.0)
             .visible(false)
-            .initialization_script(format!("window.CASE_SECTION = {start};"))
+            .initialization_script(format!(
+                "window.CASE_SECTION = {start}; window.CASE_LOCALE = {};",
+                serde_json::to_string(&store::settings().language).unwrap_or_default()
+            ))
             .on_page_load(|w, p| {
                 if p.event() == PageLoadEvent::Finished {
                     let _ = w.show();
@@ -946,6 +1063,10 @@ fn create_window(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(440.0, 600.0)
         .min_inner_size(380.0, 420.0)
         .visible(false)
+        .initialization_script(format!(
+            "window.CASE_LOCALE = {};",
+            serde_json::to_string(&store::settings().language).unwrap_or_default()
+        ))
         .on_page_load(|w, p| {
             if p.event() == PageLoadEvent::Finished && !std::mem::take(&mut rt().start_hidden) {
                 let _ = w.show();
@@ -1056,9 +1177,10 @@ fn health_tick(app: &AppHandle, first: bool) {
         // Worth interrupting for: while this lasts, every session is memory-only.
         notify(
             app,
-            "Claude is not saving sessions",
-            &format!(
-                "{} — sessions will be lost when Claude restarts.",
+            crate::locale::tr("Claude 无法保存会话", "Claude is not saving sessions"),
+            &crate::l10n!(
+                "{}：会话可能在 Claude 重启后丢失。",
+                "{}: sessions may be lost when Claude restarts.",
                 failing.join(", ")
             ),
         );
@@ -1073,14 +1195,24 @@ fn health_tick(app: &AppHandle, first: bool) {
     };
     if lost > 0 {
         let title = if lost == 1 {
-            "A session went missing from Claude’s list".to_owned()
+            crate::locale::tr(
+                "Claude 列表中有一条会话缺失",
+                "A session is missing from the Claude list",
+            )
+            .to_owned()
         } else {
-            format!("{lost} sessions went missing from Claude’s list")
+            crate::l10n!(
+                "Claude 列表中有 {lost} 条会话缺失",
+                "{lost} sessions are missing from the Claude list"
+            )
         };
         notify(
             app,
             &title,
-            "Their transcripts survived. Open CASE to restore them.",
+            crate::locale::tr(
+                "正文仍在，请打开 CASE 恢复索引。",
+                "The transcripts survived. Open CASE to restore their index entries.",
+            ),
         );
     }
 }
@@ -1113,6 +1245,7 @@ fn main() {
     #[cfg(windows)]
     platform::set_app_user_model_id();
     store::migrate_legacy();
+    locale::set(&store::settings().language);
 
     tauri::Builder::default()
         // Windows has no `activate` event, so without this a second click on the
@@ -1156,6 +1289,8 @@ fn main() {
             app_claude_installed,
             settings_open,
             settings_get,
+            settings_set_language,
+            usage_refresh,
             settings_set_hotkey,
             settings_set_presentation,
             settings_set_sorting,
@@ -1177,6 +1312,7 @@ fn main() {
             // The LaunchAgent and the Run key both start CASE with --hidden.
             rt().start_hidden = std::env::args().any(|a| a == "--hidden");
             let handle = app.handle().clone();
+            locale::install(&handle)?;
             handle.on_menu_event(|app, e| tray::on_menu(app, e.id().as_ref()));
             create_window(&handle)?;
             apply_hotkey_from_settings(&handle);
@@ -1188,7 +1324,12 @@ fn main() {
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("CASE could not start")
+        .unwrap_or_else(|_| {
+            panic!(
+                "{}",
+                crate::locale::tr("CASE 无法启动", "CASE could not start")
+            )
+        })
         .run(|app, event| {
             // The window survives a pick (hidden, not closed), so clicking the Dock
             // icon has to reveal it.

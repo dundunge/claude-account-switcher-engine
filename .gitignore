@@ -3,3 +3,7 @@ target/
 out/
 # written by tauri-build on every build
 gen/
+__pycache__/
+*.pyc
+artifacts/
+*.local.json

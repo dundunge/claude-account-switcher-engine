@@ -1,0 +1,269 @@
+//! Local installation hook; all account data stays in official Claude profiles.
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+pub static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Default)]
+pub struct Outcome {
+    pub bootstrap: bool,
+}
+
+fn checked_file(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(crate::locale::tr(
+            "同步文件路径必须为绝对路径",
+            "Sync file paths must be absolute.",
+        )
+        .into());
+    }
+    for p in path.ancestors() {
+        let meta = std::fs::symlink_metadata(p).map_err(|_| {
+            crate::locale::tr(
+                "同步文件或目录不存在",
+                "A sync file or directory is missing.",
+            )
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(crate::locale::tr(
+                "同步文件路径含符号链接，已停止打开账号",
+                "A sync path contains a symlink. Account launch stopped.",
+            )
+            .into());
+        }
+    }
+    let meta = std::fs::metadata(path)
+        .map_err(|_| crate::locale::tr("无法读取同步文件", "Could not read a sync file."))?;
+    if !meta.is_file() || meta.len() > 1024 * 1024 {
+        return Err(
+            crate::locale::tr("同步文件类型或大小无效", "Invalid sync file type or size.").into(),
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let system_python = path == Path::new("/usr/bin/python3") && meta.uid() == 0;
+        if (!system_python && meta.nlink() != 1) || meta.permissions().mode() & 0o022 != 0 {
+            return Err(crate::locale::tr(
+                "同步文件权限不安全，已停止打开账号",
+                "Unsafe sync file permissions. Account launch stopped.",
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn config_path() -> Result<PathBuf, String> {
+    Ok(dirs::home_dir()
+        .ok_or(crate::locale::tr(
+            "无法确定用户目录",
+            "Could not determine the home directory.",
+        ))?
+        .join("Library/Application Support/ClaudeSessionSync/CASE/hook.json"))
+}
+
+pub fn before_launch(target: &Path) -> Result<Outcome, String> {
+    let config = config_path()?;
+    before_launch_with_config(target, &config)
+}
+
+fn before_launch_with_config(target: &Path, config: &Path) -> Result<Outcome, String> {
+    checked_file(config)?;
+    let value: Value = serde_json::from_slice(&std::fs::read(config).map_err(|_| {
+        crate::locale::tr("无法读取同步配置", "Could not read the sync configuration.")
+    })?)
+    .map_err(|_| crate::locale::tr("同步配置无效", "Invalid sync configuration."))?;
+    if value.get("hook_enabled") == Some(&Value::Bool(false)) {
+        return Ok(Outcome::default());
+    }
+    if value.get("hook_enabled") != Some(&Value::Bool(true)) {
+        return Err(crate::locale::tr(
+            "同步配置未启用，已停止打开账号",
+            "Sync is not enabled. Account launch stopped.",
+        )
+        .into());
+    }
+    let file = |key: &str| -> Result<PathBuf, String> {
+        let path = value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or(crate::locale::tr(
+                "同步配置缺少文件路径",
+                "A file path is missing from the sync configuration.",
+            ))?;
+        checked_file(&path)?;
+        Ok(path)
+    };
+    let python = file("python_path")?;
+    let bridge = file("bridge_path")?;
+    let mut child = Command::new(python)
+        .arg(bridge)
+        .args(["--config"])
+        .arg(config)
+        .arg("--target")
+        .arg(target)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| {
+            crate::locale::tr(
+                "无法启动本地同步，已停止打开账号",
+                "Could not start local sync. Account launch stopped.",
+            )
+        })?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().map_err(|_| {
+                    crate::locale::tr("无法读取同步结果", "Could not read the sync result.")
+                })?;
+                let result: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+                    crate::locale::tr(
+                        "同步结果无效；请检查同步状态后重试",
+                        "Invalid sync result. Review the sync state before trying again.",
+                    )
+                })?;
+                if status.success() {
+                    let valid = matches!(
+                        result.get("status").and_then(Value::as_str),
+                        Some("completed" | "unchanged")
+                    );
+                    let bootstrap = result.get("bootstrap").and_then(Value::as_bool);
+                    if !valid || bootstrap.is_none() {
+                        return Err(crate::locale::tr(
+                            "同步结果无效，目标账号没有打开。",
+                            "Invalid sync result. The target account was not opened.",
+                        )
+                        .into());
+                    }
+                    return Ok(Outcome {
+                        bootstrap: bootstrap.unwrap(),
+                    });
+                }
+                let code = result
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("SYNC_FAILED");
+                let detail = match code {
+                    "CLAUDE_STILL_RUNNING" | "CLAUDE_MUST_BE_FULLY_CLOSED" => crate::locale::tr(
+                        "Claude 仍在运行。请完成任务并正常退出后重试。",
+                        "Claude is still running. Finish your work and quit normally before trying again.",
+                    ),
+                    "CLAUDE_QUIT_REQUEST_FAILED" => crate::locale::tr(
+                        "无法请求 Claude 正常退出。请手动退出后重试。",
+                        "Could not request a normal Claude quit. Quit it manually and try again.",
+                    ),
+                    "RECOVERY_REQUIRED" => crate::locale::tr(
+                        "存在未完成的同步，需要先按快照恢复。",
+                        "An unfinished sync requires recovery from its snapshot first.",
+                    ),
+                    "MULTIPLE_PROFILE_PARTITIONS" => crate::locale::tr(
+                        "一个登录目录内发现多个账号或组织，需要先明确同步范围。",
+                        "Multiple accounts or organizations were found in one profile. Specify the sync scope first.",
+                    ),
+                    "PROFILE_SCOPE_CHANGED_RETRY" => crate::locale::tr(
+                        "登录目录刚完成初始化，请重试打开账号。",
+                        "The profile has just been initialized. Try opening it again.",
+                    ),
+                    _ => crate::locale::tr(
+                        "本地会话同步未通过，目标账号没有打开。请检查同步记录。",
+                        "Local session sync failed. The target account was not opened. Review the sync log.",
+                    ),
+                };
+                let safe_code = if code
+                    .bytes()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+                    && code.len() <= 80
+                {
+                    code
+                } else {
+                    "SYNC_FAILED"
+                };
+                return Err(format!("{detail}\n{safe_code}"));
+            }
+            Ok(None) if start.elapsed() < Duration::from_secs(75) => {
+                std::thread::sleep(Duration::from_millis(100))
+            }
+            _ => {
+                let _ = child.kill(); // Only our hook child; never a Claude process.
+                let _ = child.wait();
+                return Err(crate::locale::tr("同步超时，已停止打开账号；请检查是否需要按快照恢复。", "Sync timed out. Account launch stopped. Check whether snapshot recovery is required.").into());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_hook_path_is_rejected() {
+        assert!(checked_file(Path::new("relative.json")).is_err());
+    }
+
+    #[test]
+    fn a_missing_hook_file_is_rejected() {
+        assert!(checked_file(&std::env::temp_dir().join("case-missing-hook-62a224bb")).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hook_fixture(body: &str) -> Result<Outcome, String> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("case-hook-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let script = dir.join("bridge.py");
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let config = dir.join("hook.json");
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&serde_json::json!({
+                "hook_enabled": true, "python_path": "/usr/bin/python3", "bridge_path": script
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = before_launch_with_config(&dir, &config);
+        std::fs::remove_dir_all(dir).unwrap();
+        result
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn successful_bootstrap_is_reported_to_the_launcher() {
+        assert!(
+            hook_fixture("print('{\"status\":\"unchanged\",\"bootstrap\":true}')")
+                .unwrap()
+                .bootstrap
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn failed_sync_blocks_the_launcher_with_a_safe_code() {
+        let result = hook_fixture(
+            "import sys\nprint('{\"status\":\"blocked\",\"code\":\"CLAUDE_STILL_RUNNING\"}')\nsys.exit(2)",
+        );
+        assert!(result.err().unwrap().contains("CLAUDE_STILL_RUNNING"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn malformed_or_incomplete_results_block_the_launcher() {
+        assert!(hook_fixture("print('not JSON')").is_err());
+        assert!(hook_fixture("print('{\"status\":\"blocked\"}')").is_err());
+    }
+}

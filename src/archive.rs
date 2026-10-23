@@ -61,7 +61,11 @@ fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
 /// default profile, not while it is running.
 pub fn archive(account: &Account, bytes: Option<u64>) -> Result<Archived, String> {
     if !account.dir.exists() {
-        return Err("That profile folder is no longer there.".into());
+        return Err(crate::locale::tr(
+            "账号目录已不存在。",
+            "The profile folder no longer exists.",
+        )
+        .into());
     }
     let mut base = account.dir.as_os_str().to_owned();
     base.push(SUFFIX);
@@ -86,7 +90,11 @@ pub fn archive(account: &Account, bytes: Option<u64>) -> Result<Archived, String
 /// Answers where it went.
 pub fn restore(record: &Archived) -> Result<PathBuf, String> {
     if !record.dir.exists() {
-        return Err("The archived folder is no longer there.".into());
+        return Err(crate::locale::tr(
+            "归档目录已不存在。",
+            "The archived folder no longer exists.",
+        )
+        .into());
     }
     let dest = free_path(&record.original_dir);
     rename(&record.dir, &dest).map_err(|e| format!("Could not move the profile back: {e}"))?;
@@ -96,9 +104,10 @@ pub fn restore(record: &Archived) -> Result<PathBuf, String> {
 /// The one destructive call here. Named plainly; confirmed by the caller.
 pub fn destroy(record: &Archived) -> Result<(), String> {
     match std::fs::remove_dir_all(&record.dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Err(format!("Could not delete the archive: {e}"))
-        }
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(crate::l10n!(
+            "无法删除归档：{e}",
+            "Could not delete the archive: {e}"
+        )),
         _ => Ok(()),
     }
 }

@@ -2,34 +2,37 @@ name: Check
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   check:
     strategy:
-      # Both legs always run: knowing a change breaks one platform is more
-      # useful when you can see at the same time whether it broke the other.
-      # Each leg is also the only thing that compiles that platform's half of
-      # src/platform, so this is where a Windows-only gap shows up.
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
       - uses: Swatinem/rust-cache@v2
-
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - run: cargo fmt --check
-
       - run: cargo clippy --all-targets -- -D warnings
-
-      # Unit tests, plus tests/bridge.rs, which holds the page, its bridge and
-      # the registered commands and events to the same names.
       - run: cargo test
+      - run: node --test tests/i18n.test.cjs
+      - uses: actions/setup-python@v5
+        if: runner.os == 'macOS'
+        with:
+          python-version: '3.9'
+      - name: Offline sync and usage tests
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s tests/python -q
