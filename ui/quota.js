@@ -1,7 +1,7 @@
 'use strict'
 
-// The launcher and Settings share manual-query behavior. Creating a controller
-// or rendering a card never starts a query; only explicit button handlers do.
+// The launcher and Settings share manual-query behavior. Rendering/polling never
+// queries. Optional scheduled work is owned by one backend worker.
 const USAGE_STATUSES = new Set(['success', 'auth_failed', 'unavailable', 'in_progress', 'failed', 'timeout'])
 
 function quotaError (code) {
@@ -47,6 +47,66 @@ function quotaError (code) {
 
 function quotaClockHint () {
   return h('p', { class: 'help quota-hint' }, tf('百分比为已用额度；时间按 {0} 显示。悬停可查看完整重置日期和剩余比例。', 'Percentages show used quota; times use {0}. Hover for the full reset date and remaining quota.', Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'))
+}
+
+function quotaScheduleMinutes (value, unit) {
+  if (!['minutes', 'hours'].includes(unit) || !String(value).trim()) return null
+  const minutes = Number(value) * (unit === 'hours' ? 60 : 1)
+  const rounded = Math.round(minutes)
+  return Number.isFinite(minutes) && Math.abs(minutes - rounded) < 1e-7 && rounded >= 5 && rounded <= 10080 ? rounded : null
+}
+
+function quotaScheduleStatus (schedule = {}) {
+  if (schedule.code === 'USAGE_SCHEDULE_SAVE_FAILED') return tr('无法保存下次刷新时间，尚未发起本轮查询。请检查本地磁盘。', 'The next refresh time could not be saved. This cycle has not queried usage. Check the local disk.')
+  if (!schedule.enabled) return schedule.running
+    ? tr('已关闭定时刷新，当前查询结束后停止。', 'Scheduled refresh is off; the current query will finish.')
+    : tr('定时刷新已关闭。仍可在主页手动刷新。', 'Scheduled refresh is off. Manual refresh is available on the home page.')
+  const interval = schedule.intervalMinutes % 60 === 0
+    ? tf('每 {0} 小时', 'Every {0} hours', schedule.intervalMinutes / 60)
+    : tf('每 {0} 分钟', 'Every {0} minutes', schedule.intervalMinutes)
+  const next = schedule.nextAt ? new Date(schedule.nextAt).toLocaleString(I18N.language, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short' }) : tr('等待计时', 'Pending')
+  return schedule.running
+    ? tf('{0}；正在定时刷新。下一次：{1}', '{0}; scheduled refresh is running. Next: {1}', interval, next)
+    : tf('{0}；下一次刷新：{1}', '{0}; next refresh: {1}', interval, next)
+}
+
+function quotaScheduleLastRun (schedule = {}) {
+  const run = schedule.lastRun
+  if (!run) return ''
+  return tf('上轮定时刷新：{0} 个成功，{1} 个未获取，{2} 个跳过。', 'Last scheduled refresh: {0} succeeded, {1} unavailable, {2} skipped.', run.succeeded, run.failed, run.skipped) +
+    (run.interrupted ? tr(' 设置已变更，未继续查询其余账号。', ' Settings changed; remaining accounts were not queried.') : '')
+}
+
+function quotaScheduleCard (schedule = {}, saving, onSave) {
+  const minutes = schedule.intervalMinutes || 120
+  const inHours = minutes % 60 === 0
+  const input = h('input', { type: 'number', class: 'text-input', value: String(inHours ? minutes / 60 : minutes), min: '0', step: 'any', required: true, disabled: saving, 'aria-label': tr('刷新间隔数值', 'Refresh interval value') })
+  const unit = h('select', { class: 'select', disabled: saving, 'aria-label': tr('刷新间隔单位', 'Refresh interval unit') },
+    h('option', { value: 'minutes', selected: !inHours }, tr('分钟', 'Minutes')),
+    h('option', { value: 'hours', selected: inHours }, tr('小时', 'Hours')))
+  const save = async enabled => {
+    const intervalMinutes = quotaScheduleMinutes(input.value, unit.value)
+    if (intervalMinutes === null) {
+      toast(tr('请输入 5 分钟至 7 天之间的间隔，精确到整分钟。', 'Enter an interval from 5 minutes to 7 days, in whole minutes.'), 'error')
+      return Boolean(schedule.enabled)
+    }
+    const result = await onSave(enabled, intervalMinutes)
+    return result?.enabled ?? Boolean(schedule.enabled)
+  }
+  return h('section', { class: 'card quota-schedule', dataset: { quotaSchedule: 'true' }, 'aria-label': tr('定时刷新额度', 'Scheduled quota refresh') },
+    settingRow(tr('定时刷新额度', 'Scheduled quota refresh'), tr('默认关闭；串行查询已授权账号，CASE 退出时暂停。', 'Off by default. Queries authorized accounts serially while CASE is running.'),
+      toggle(tr('定时刷新额度', 'Scheduled quota refresh'), schedule.enabled, async enabled => enabled
+        ? save(true)
+        : (await onSave(false, minutes))?.enabled ?? Boolean(schedule.enabled), { disabled: saving })),
+    h('form', { class: 'quota-schedule-form', onsubmit: e => { e.preventDefault(); return save(Boolean(schedule.enabled)) } },
+      h('span', { class: 'help' }, tr('刷新间隔', 'Interval')), input, unit,
+      h('button', { type: 'submit', class: 'btn', disabled: saving }, saving ? tr('保存中…', 'Saving…') : tr('保存间隔', 'Save interval')),
+      h('button', { type: 'button', class: 'btn quiet', disabled: saving, onclick: () => onSave(Boolean(schedule.enabled), 120) }, tr('2 小时', '2 hours')),
+      h('button', { type: 'button', class: 'btn quiet', disabled: saving, onclick: () => onSave(Boolean(schedule.enabled), 300) }, tr('5 小时', '5 hours'))),
+    h('p', { class: 'help' }, tr('可设 5 分钟至 7 天，精确到整分钟；建议每 2 或 5 小时刷新。', 'Set 5 minutes to 7 days, in whole minutes. A 2- or 5-hour interval is recommended.')),
+    h('p', { class: 'help', role: 'status', dataset: { scheduleStatus: 'true' } }, quotaScheduleStatus(schedule)),
+    h('p', { class: 'help', dataset: { scheduleLastRun: 'true' } }, quotaScheduleLastRun(schedule)),
+    h('p', { class: 'help' }, tr('开启或修改间隔后重新计时，不立即查询。休眠后最多补一轮，失败不立即重试；需登录或设置未完成的账号会跳过。', 'Enabling or changing the interval restarts the timer without querying immediately. After sleep, at most one missed cycle runs. Failures are not retried immediately; accounts needing login or setup are skipped.')))
 }
 
 function createQuotaController ({ getAccounts, onChange }) {

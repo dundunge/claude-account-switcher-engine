@@ -467,6 +467,12 @@ kbd {
 
 .usage-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
 .usage-page { display: flex; flex-direction: column; gap: 14px; }
+.quota-schedule { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.quota-schedule > .card-row { min-height: 0; padding: 0; }
+.quota-schedule > p:empty { display: none; }
+.quota-schedule-form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.quota-schedule-form .text-input { width: 90px; }
+.quota-schedule-form .select { width: auto; }
 .quota-actions, .quota-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .quota-heading { justify-content: space-between; }
 .quota-hint { font-size: 10.5px; }

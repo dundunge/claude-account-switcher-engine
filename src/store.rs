@@ -108,6 +108,8 @@ pub struct Settings {
     /// Checks only — nothing is ever downloaded or installed without being asked.
     pub auto_update_check: bool,
     pub last_update_check: i64,
+    #[serde(deserialize_with = "read_usage_schedule")]
+    pub usage_schedule: crate::usage_schedule::Config,
 }
 
 impl Default for Settings {
@@ -121,6 +123,7 @@ impl Default for Settings {
             sort_by_recent: false,
             auto_update_check: true,
             last_update_check: 0,
+            usage_schedule: crate::usage_schedule::Config::default(),
         }
     }
 }
@@ -154,6 +157,15 @@ impl Config {
 /// account list.
 fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Option<T>, D::Error> {
     Ok(serde_json::from_value(serde_json::Value::deserialize(d)?).ok())
+}
+
+// A malformed new optional setting must never make an existing account list
+// unreadable. Invalid schedule values disable scheduling, preserving accounts.
+fn read_usage_schedule<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<crate::usage_schedule::Config, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 // --------------------------------------------------------------------- io ---
@@ -396,6 +408,49 @@ mod tests {
         let saved = load_from(&file).unwrap();
         assert_eq!(saved.settings.language, "en");
         assert_eq!(saved.accounts()[0].name, "中文 Work");
+    }
+
+    #[test]
+    fn schedule_upgrade_is_disabled_and_custom_settings_roundtrip_with_accounts_intact() {
+        let dir = scratch();
+        let file = dir.join("accounts.json");
+        std::fs::write(
+            &file,
+            r#"{"accounts":[{"id":"a","name":"Work","dir":"/synthetic"}]}"#,
+        )
+        .unwrap();
+        let mut config = load_from(&file).unwrap();
+        assert!(!config.settings.usage_schedule.enabled);
+        assert_eq!(config.settings.usage_schedule.interval_minutes, 120);
+        config.settings.usage_schedule = crate::usage_schedule::Config {
+            enabled: true,
+            interval_minutes: 95,
+            next_at: Some(10_000_000),
+        };
+        save_to(&file, &config).unwrap();
+        let saved = load_from(&file).unwrap();
+        assert_eq!(
+            saved.settings.usage_schedule,
+            config.settings.usage_schedule
+        );
+        assert_eq!(saved.accounts()[0].id, "a");
+    }
+
+    #[test]
+    fn malformed_schedule_does_not_discard_an_existing_account_list() {
+        let dir = scratch();
+        let file = dir.join("accounts.json");
+        for schedule in [
+            r#"{"enabled":true,"intervalMinutes":"bad"}"#,
+            "null",
+            "false",
+        ] {
+            std::fs::write(&file, format!(r#"{{"accounts":[{{"id":"a","name":"Work","dir":"/synthetic"}}],"settings":{{"usageSchedule":{schedule}}}}}"#)).unwrap();
+            let config = load_from(&file).unwrap();
+            assert!(!config.settings.usage_schedule.enabled);
+            assert_eq!(config.accounts()[0].id, "a");
+            assert!(!file.with_extension("json.unreadable").exists());
+        }
     }
 
     #[test]

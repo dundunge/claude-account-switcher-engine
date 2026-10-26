@@ -21,6 +21,7 @@ mod tray;
 mod update;
 mod usage;
 mod usage_monitor;
+mod usage_schedule;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -938,7 +939,21 @@ fn settings_get() -> Value {
     v["defaultHotkey"] = platform::DEFAULT_HOTKEY.into();
     v["dataDir"] = json!(store::conf_dir());
     v["backupsDir"] = json!(store::backup_root());
+    v["usageSchedule"] = json!(usage_schedule::snapshot());
     v
+}
+
+#[tauri::command(async)]
+fn usage_schedule_status() -> Value {
+    json!(usage_schedule::snapshot())
+}
+
+#[tauri::command(async)]
+fn settings_set_usage_schedule(enabled: bool, interval_minutes: u32) -> Value {
+    match usage_schedule::configure(enabled, interval_minutes) {
+        Ok(schedule) => json!({ "ok": true, "schedule": schedule }),
+        Err(code) => json!({ "ok": false, "code": code }),
+    }
 }
 
 #[tauri::command(async)]
@@ -1633,6 +1648,8 @@ fn main() {
             settings_open,
             settings_get,
             settings_set_language,
+            settings_set_usage_schedule,
+            usage_schedule_status,
             usage_refresh,
             usage_monitor_connect,
             usage_monitor_setup,
@@ -1666,6 +1683,7 @@ fn main() {
             let h = handle.clone();
             app.notification().on_action(move |_| reveal_health(&h))?;
             start_watching(handle);
+            usage_schedule::start();
             Ok(())
         })
         .build(tauri::generate_context!())

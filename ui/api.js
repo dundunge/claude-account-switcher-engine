@@ -35,6 +35,8 @@ window.api = {
   claudeInstalled: () => invoke('app_claude_installed'),
   openSettings: section => invoke('settings_open', { section }),
   getSettings: () => invoke('settings_get'),
+  getUsageSchedule: () => invoke('usage_schedule_status'),
+  setUsageSchedule: (enabled, intervalMinutes) => invoke('settings_set_usage_schedule', { enabled, intervalMinutes }),
   setLanguage: language => invoke('settings_set_language', { language }),
   refreshUsage: (id, native = true) => invoke('usage_refresh', { id, native }),
   connectUsageMonitor: id => invoke('usage_monitor_connect', { id }),

@@ -5,7 +5,7 @@
 
 const sections = () => [
   { id: 'general', label: tr("通用", "General"), icon: 'sliders', lede: tr("设置启动方式和账号列表顺序。", "How CASE starts, and how your accounts are listed.") },
-  { id: 'usage', label: tr('额度查询', 'Usage queries'), icon: 'refresh', lede: tr('主页可直接刷新全部账号。这里可逐账号查询、管理授权和打开独立 CLI。仅手动查询。', 'Refresh every account from the home page. Query individual accounts, manage authorization, and open account CLIs here. Queries are manual only.') },
+  { id: 'usage', label: tr('额度查询', 'Usage queries'), icon: 'refresh', lede: tr('主页可手动刷新全部账号。这里可设置定时刷新、逐账号查询、管理授权和打开独立 CLI。', 'Manually refresh all accounts from home. Set scheduled refresh, query individual accounts, manage authorization and open account CLIs here.') },
   { id: 'shortcut', label: tr("快捷键", "Shortcut"), icon: 'keyboard', lede: tr("在任意应用中调出账号列表。", "Summon the launcher from any app.") },
   { id: 'presence', label: IS_WIN ? tr("通知区域", "Notification area") : tr("菜单栏与程序坞", "Menu bar & Dock"), icon: 'window', lede: tr("选择 CASE 的显示位置，始终保留一个可打开的入口。", "Choose where CASE lives. One place always stays, so there is a way back in.") },
   { id: 'updates', label: tr("更新", "Updates"), icon: 'download', lede: tr("更新仅检查 dundunge/claude-account-switcher-engine。", "Updates are checked only in dundunge/claude-account-switcher-engine.") },
@@ -19,6 +19,8 @@ const T = {
   archived: null,
   accounts: null,
   health: null,
+  schedule: null,
+  savingSchedule: false,
   update: null,     // the last check's answer
   upd: 'idle',      // idle | checking | downloading | restarting
   progress: 0
@@ -73,7 +75,7 @@ const section = (label, ...kids) => h('section', { class: 'stack', 'aria-label':
 
 const VIEWS = {
   usage () {
-    return [h('div', { class: 'usage-page' }, quotaClockHint(),
+    return [h('div', { class: 'usage-page' }, quotaScheduleCard(T.schedule, T.savingSchedule, saveQuotaSchedule), quotaClockHint(),
       T.accounts === null ? h('p', { class: 'help' }, tr('正在读取账号列表…', 'Loading accounts…'))
         : T.accounts.length ? T.accounts.map(account => quota.card(account, true))
           : h('p', { class: 'help' }, tr('请先在主页添加账号。', 'Add an account on the home page first.')))]
@@ -402,12 +404,45 @@ function paintQuota (id) {
   })
 }
 
+function paintQuotaSchedule (controls = false) {
+  if (T.section !== 'usage') return
+  const card = $content.querySelector('[data-quota-schedule]')
+  if (!card) return
+  if (controls) card.replaceWith(quotaScheduleCard(T.schedule, T.savingSchedule, saveQuotaSchedule))
+  else {
+    card.querySelector('[data-schedule-status]').textContent = quotaScheduleStatus(T.schedule)
+    card.querySelector('[data-schedule-last-run]').textContent = quotaScheduleLastRun(T.schedule)
+  }
+}
+
+async function saveQuotaSchedule (enabled, intervalMinutes) {
+  if (T.savingSchedule) return T.schedule
+  T.savingSchedule = true
+  paintQuotaSchedule(true)
+  try {
+    const result = await api.setUsageSchedule(enabled, intervalMinutes)
+    if (!result?.ok) throw new Error('save failed')
+    T.schedule = result.schedule
+  } catch {
+    toast(tr('定时刷新设置未保存，请检查本地配置后重试。', 'Scheduled refresh settings were not saved. Check the local configuration and retry.'), 'error')
+  } finally {
+    T.savingSchedule = false
+    paintQuotaSchedule(true)
+  }
+  return T.schedule
+}
+
 let pullingQuotaStatus = false
 async function pullQuotaStatus () {
   if (pullingQuotaStatus || T.accounts === null) return
   pullingQuotaStatus = true
   try {
-    const status = new Map((await api.status()).map(account => [account.id, account]))
+    const [accounts, schedule] = await Promise.all([api.status(), api.getUsageSchedule()])
+    if (!T.savingSchedule && (!T.schedule || schedule.version >= T.schedule.version)) {
+      T.schedule = schedule
+      paintQuotaSchedule()
+    }
+    const status = new Map(accounts.map(account => [account.id, account]))
     const changed = []
     T.accounts = T.accounts.map(account => {
       const incoming = status.get(account.id)
@@ -486,6 +521,7 @@ api.onUpdateAvailable(info => {
 
 ;(async () => {
   T.settings = await api.getSettings()
+  T.schedule = T.settings.usageSchedule || { enabled: false, intervalMinutes: 120, version: 0 }
   render()
   loadArchived()
   api.scanHealth().then(d => {

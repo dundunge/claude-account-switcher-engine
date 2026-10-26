@@ -1,4 +1,4 @@
-//! Manual account-scoped queries through the unmodified official Claude Code CLI.
+//! Account-scoped queries through the unmodified official Claude Code CLI.
 //! CASE stores binding metadata only. Claude owns all authentication material.
 use crate::{native_usage, store, usage};
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,27 @@ impl Tracker {
         e.view.code = None;
         e.view.last_attempt_at = Some(now);
         Some(e.epoch)
+    }
+
+    fn begin_scheduled(&mut self, id: &str, scope: Scope, now: i64, interval: i64) -> Option<u64> {
+        // Scheduled work must never fall back to opening/clicking a Desktop panel.
+        if scope.invalid || !scope.matches() {
+            return None;
+        }
+        let e = self.entry(id, scope.clone());
+        if e.busy
+            || e.view.status == "auth_failed"
+            || matches!(
+                e.view.code.as_deref(),
+                Some("CLI_SETUP_REQUIRED" | "CLI_WORKSPACE_TRUST_REQUIRED")
+            )
+            || e.view
+                .last_attempt_at
+                .is_some_and(|at| at > now.saturating_sub(interval))
+        {
+            return None;
+        }
+        self.begin(id, scope, now)
     }
 
     fn finish(&mut self, id: &str, epoch: u64, result: ProbeResult, now: i64) {
@@ -549,8 +570,7 @@ fn execute(_: &store::Account, _: &Binding) -> ProbeResult {
     ProbeResult::error("PLATFORM_UNSUPPORTED")
 }
 
-/// Called only by usage_refresh, after a user click. Opening CASE, opening a
-/// page and status polling never start a CLI process or make a usage request.
+/// Explicit user query. Status polling and opening a page never invoke this.
 pub fn refresh(account: &store::Account) -> Snapshot {
     let current = scope(account);
     let ticket = TRACKER.lock().unwrap_or_else(|e| e.into_inner()).begin(
@@ -561,6 +581,21 @@ pub fn refresh(account: &store::Account) -> Snapshot {
     let Some(epoch) = ticket else {
         return snapshot(account);
     };
+    finish_refresh(account, current, epoch)
+}
+
+/// The sole backend scheduler skips unconfigured, invalid, busy, recently
+/// attempted or blocked accounts. It never authorizes or opens a terminal.
+pub fn refresh_scheduled(account: &store::Account, interval: i64) -> Option<Snapshot> {
+    let current = scope(account);
+    let epoch = TRACKER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .begin_scheduled(&account.id, current.clone(), crate::now_ms(), interval)?;
+    Some(finish_refresh(account, current, epoch))
+}
+
+fn finish_refresh(account: &store::Account, current: Scope, epoch: u64) -> Snapshot {
     let result = execute(
         account,
         current.binding.as_ref().expect("begin needs binding"),
@@ -637,6 +672,83 @@ mod tests {
             assert!(t.begin(id, scope(id), 1003).is_some());
         }
         assert_eq!(t.entries.len(), 3);
+    }
+
+    #[test]
+    fn scheduled_queries_skip_unbound_mismatched_and_busy_profiles() {
+        let mut t = Tracker::default();
+        let mut unbound = scope("a");
+        unbound.binding = None;
+        assert!(t.begin_scheduled("a", unbound, 1000, 300_000).is_none());
+        let mut mismatched = scope("a");
+        mismatched.identity = Some(("other".into(), "org".into()));
+        assert!(t.begin_scheduled("a", mismatched, 1000, 300_000).is_none());
+        assert!(t.entries.is_empty(), "no native cache or panel fallback");
+        let ticket = t.begin("a", scope("a"), 1000).unwrap();
+        assert!(t.begin_scheduled("a", scope("a"), 1001, 300_000).is_none());
+        assert!(t.entries["a"].busy);
+        t.finish("a", ticket, good(), 1002);
+        assert_eq!(t.entries["a"].view.status, "success");
+    }
+
+    #[test]
+    fn scheduled_queries_skip_recent_manual_attempts_without_clearing_them() {
+        let mut t = Tracker::default();
+        let ticket = t.begin("a", scope("a"), 1000).unwrap();
+        t.finish("a", ticket, good(), 1002);
+        assert!(
+            t.begin_scheduled("a", scope("a"), 300_999, 300_000)
+                .is_none()
+        );
+        assert!(t.entries["a"].view.usage.is_some());
+        assert!(
+            t.begin_scheduled("a", scope("a"), 301_000, 300_000)
+                .is_some()
+        );
+        assert!(t.entries["a"].view.usage.is_none());
+        assert_eq!(t.entries["a"].view.status, "in_progress");
+    }
+
+    #[test]
+    fn auth_and_setup_failures_require_manual_action_before_scheduling_resumes() {
+        for code in [
+            "CLI_AUTH_REQUIRED",
+            "CLI_SETUP_REQUIRED",
+            "CLI_WORKSPACE_TRUST_REQUIRED",
+        ] {
+            let mut t = Tracker::default();
+            let ticket = t.begin("a", scope("a"), 1000).unwrap();
+            let mut failure = ProbeResult::error(code);
+            if code == "CLI_AUTH_REQUIRED" {
+                failure.status = "auth_failed".into();
+            }
+            t.finish("a", ticket, failure, 1002);
+            assert!(
+                t.begin_scheduled("a", scope("a"), 1_000_000, 300_000)
+                    .is_none()
+            );
+            // Explicit retry still works after the user finishes the required setup.
+            let manual = t.begin("a", scope("a"), 1_000_001).unwrap();
+            t.finish("a", manual, good(), 1_000_002);
+            assert!(
+                t.begin_scheduled("a", scope("a"), 1_300_001, 300_000)
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_failure_keeps_usage_null_without_immediate_retry() {
+        let mut t = Tracker::default();
+        let ticket = t.begin_scheduled("a", scope("a"), 1000, 300_000).unwrap();
+        t.finish("a", ticket, ProbeResult::error("REFRESH_TIMEOUT"), 1002);
+        assert_eq!(t.entries["a"].view.status, "timeout");
+        assert!(t.entries["a"].view.usage.is_none());
+        assert!(t.begin_scheduled("a", scope("a"), 1003, 300_000).is_none());
+        assert!(
+            t.begin_scheduled("a", scope("a"), 301_000, 300_000)
+                .is_some()
+        );
     }
 
     #[test]

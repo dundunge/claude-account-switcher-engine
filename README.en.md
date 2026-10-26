@@ -8,7 +8,7 @@ This repository is maintained independently. Update checks, source and release l
 use `dundunge/claude-account-switcher-engine` exclusively; upstream is never merged automatically.
 
 CASE is for people who prefer the **official Claude Desktop** while using multiple accounts.
-It manages local account switching, session index sync and manual quota queries.
+It manages local account switching, session index sync, and manual or optional scheduled quota queries.
 **It does not use a reverse proxy or model API relay.**
 
 **Currently adapted and verified only with Claude Pro.** The maintainer does not have a Max subscription
@@ -37,9 +37,15 @@ See the [screenshot gallery](docs/SCREENSHOTS.md) and [local browser demo](docs/
   CASE does not read cookies, tokens or Keychain credentials; the official CLI manages its own isolated login.
 - Open independent CLI reuses that account's existing login; reauthorization is a separate action.
   Running `claude` in an ordinary Terminal still uses the default CLI configuration.
-- Per-account refresh, Refresh all and the query action in Settings run official `/usage`, including for closed accounts. **Only on click:** no scheduled
-  queries or automatic retries, model messages or account switching. Failed queries return null; status polling
+- Per-account refresh, Refresh all and the query action in Settings run official `/usage`, including for closed accounts.
+  Queries are manual by default. No model messages or account switching. Failed queries return null; status polling
   cannot refill old percentages.
+- Settings → Usage queries offers **scheduled refresh**, off by default. Set a custom interval in minutes or hours
+  (5 minutes to 7 days, in whole minutes), use 2-hour / 5-hour presets, and see the next refresh time.
+  One backend timer queries authorized accounts serially while CASE is running. After sleep or time spent closed,
+  at most one missed cycle runs; failures do not trigger immediate retries. Enabling or changing the interval
+  restarts the timer. Turning it off lets the current query finish and stops the remaining accounts.
+  See [scheduled refresh](docs/SCHEDULED-USAGE.md).
 - With no independent CLI binding, Read panel observes the open account's Claude panel. This path requires
   macOS Accessibility permission and may briefly open and close the Usage popover.
   Reset notices retain their original wording. Estimated resets stay anchored to the original observation,
@@ -52,7 +58,7 @@ See the [screenshot gallery](docs/SCREENSHOTS.md) and [local browser demo](docs/
 No Claude bundle modification, transcript upload, cloud chat migration or quota reset.
 Local index sharing cannot transfer another account's model context cache. Use local handoff files for long tasks.
 
-See [docs/MANUAL-USAGE.md](docs/MANUAL-USAGE.md) for manual queries and
+See [docs/MANUAL-USAGE.md](docs/MANUAL-USAGE.md) for queries and authorization, and
 [docs/NATIVE-USAGE.md](docs/NATIVE-USAGE.md) for panel fallback limitations. CodexBar is not required.
 
 ## No reverse proxy: official clients and login flows
@@ -77,7 +83,7 @@ proxy environment variables. CASE does not change, reload or restart Clash/Mihom
 | --- | --- | --- |
 | Desktop switch | Official Desktop login in a separate `--user-data-dir` per account | Explicit Switch action; normal Claude exit, local index validation and sync, then target-account launch |
 | Usage authorization | Separate CLI configuration, empty workspace and Electron login directory per account | An explicit Settings action; account/org must match the target Desktop profile |
-| Quota query | Official CLI `/usage` in the bound account scope | Manual refresh of one or all accounts; no Desktop switch, client exit or automatic login |
+| Quota query | Official CLI `/usage` in the bound account scope | Manual refresh of one or all accounts, or explicitly enabled scheduled refresh; no Desktop switch, client exit or automatic login |
 
 1. **The login states differ.** A signed-in Desktop profile does not authorize the isolated CLI. Each account
    needs its own official usage authorization and initial setup. CASE does not copy Desktop credentials or
@@ -93,12 +99,17 @@ proxy environment variables. CASE does not change, reload or restart Clash/Mihom
 
 `usage_refresh` uses `success`, `auth_failed`, `unavailable`, `in_progress`, `failed` and `timeout`.
 Every failed attempt returns `usage: null`; later status polling cannot restore an old percentage.
-Only clicks request quota. Local state polling and time-label repainting do not.
+Queries are manual by default; an explicitly enabled schedule uses one backend timer.
+Local state polling and time-label repainting do not request quota.
 
 ## Verification status
 
-Latest offline source verification on 2026-10-25 (America/Los_Angeles): **220 tests passed** — Python 120,
-Rust unit 64 plus bridge 3, and Node 33. Formatting, Clippy and JavaScript syntax checks passed.
+Local offline verification of scheduled refresh on 2026-10-26 (America/Los_Angeles): **237 tests passed** —
+Python 120, Rust unit 76 plus bridge 3, and Node 38. Clippy passed. New tests use simulated queries;
+real-account scheduled refresh has not been enabled. This change remains local and has not been uploaded to GitHub.
+See [scheduled refresh](docs/SCHEDULED-USAGE.md) for scope and review entry points.
+
+The 2026-10-25 audit-fix version passed **220 tests**, plus formatting, Clippy and JavaScript syntax checks.
 Grok checked 77 file hashes and reran 15 Node tests against the preceding audit package, reporting three issues.
 The current source fixes the panel-lock status, background-activity parsing and batch counts for queries already
 running in another window. These fixes await independent re-review; see the
@@ -109,11 +120,11 @@ Manual queries in that installed app succeeded for three
 independently authorized accounts, showing both used percentages and their reset times. Row selection,
 single-account refresh, Refresh all, Settings management and opening an authorized independent CLI were checked.
 No real Desktop switch was executed in that round; its event routing is covered by offline tests.
-The audit fixes have not replaced that installed app. The browser demo and screenshots do not verify real accounts.
+The audit fixes and scheduled refresh have not replaced that installed app. The browser demo and screenshots do not verify real accounts.
 
 Implementer testing and independent review have separate scopes; official requests may still fail.
 See [docs/GROK-AUDIT-20261025.md](docs/GROK-AUDIT-20261025.md) for the preceding scope and reproduction commands.
-This update publishes source and documentation; it does not create a new GitHub Release.
+This local update has not been uploaded to GitHub or released.
 
 ## Build and update
 

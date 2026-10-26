@@ -23,6 +23,7 @@ const demoAccounts = [
     usage, monitor: { configured: true, version: ++demoVersion, status: 'success', usage, lastAttemptAt: usage.at } }
 })
 const demoSettings = { version: '4.2.1', language: window.CASE_LOCALE,
+  usageSchedule: { version: 1, enabled: false, intervalMinutes: 120, nextAt: null, running: false, lastRun: null, code: null },
   hotkey: 'Alt+Command+C', defaultHotkey: 'Alt+Command+C', hotkeyEnabled: true,
   menuBar: true, hideDock: false, openAtLogin: false, sortByRecent: false,
   autoUpdate: false, syncEdition: 'CASE_LOCAL_SYNC_EDITION_V1',
@@ -36,6 +37,13 @@ async function demoInvoke (command, args = {}) {
     case 'accounts_status': return demoCopy(demoAccounts)
     case 'app_claude_installed': return { installed: true, hint: '' }
     case 'settings_get': return demoCopy(demoSettings)
+    case 'usage_schedule_status': return demoCopy(demoSettings.usageSchedule)
+    case 'settings_set_usage_schedule': {
+      if (!Number.isInteger(args.intervalMinutes) || args.intervalMinutes < 5 || args.intervalMinutes > 10080) return { ok: false, code: 'USAGE_SCHEDULE_INTERVAL_INVALID' }
+      demoSettings.usageSchedule = { ...demoSettings.usageSchedule, version: demoSettings.usageSchedule.version + 1,
+        enabled: args.enabled, intervalMinutes: args.intervalMinutes, nextAt: args.enabled ? Date.now() + args.intervalMinutes * 60000 : null }
+      return demoCopy({ ok: true, schedule: demoSettings.usageSchedule })
+    }
     case 'health_scan': return { accounts: demoAccounts.map(a => ({ id: a.id, name: a.name, orphans: [], failures: null })) }
     case 'settings_set_language':
       demoSettings.language = args.language

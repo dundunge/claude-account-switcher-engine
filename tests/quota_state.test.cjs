@@ -52,10 +52,11 @@ test('official CLI has a distinct source label in Chinese and English', () => {
   assert.match(vm.runInContext('usageAge(reading)', scope), /CLI/)
 })
 
-test('scheduled callbacks and app startup never trigger usage requests', () => {
+test('UI timers only poll local state; optional scheduling belongs to the backend', () => {
   const main = source('src/main.rs')
   const watch = main.slice(main.indexOf('fn start_watching'), main.indexOf('// -------------------------------------------------------------------- main'))
   assert.doesNotMatch(watch, /usage_monitor|usage_refresh/)
+  assert.match(main, /usage_schedule::start\(\)/)
   const pages = source('ui/launcher.js') + source('ui/settings.js')
   const intervals = [...pages.matchAll(/setInterval\(\(\) => \{([\s\S]*?)\}, \d+\)/g)]
   assert.ok(intervals.length > 0)
