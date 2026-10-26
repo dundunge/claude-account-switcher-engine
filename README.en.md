@@ -11,6 +11,14 @@ CASE is for people who prefer the **official Claude Desktop** while using multip
 It manages local account switching, session index sync and manual quota queries.
 **It does not use a reverse proxy or model API relay.**
 
+**Currently adapted and verified only with Claude Pro.** The maintainer does not have a Max subscription
+account, so Max has not been adapted or verified.
+
+![CASE English demo: three accounts with manual usage queries](docs/media/case-overview-en.jpg)
+
+*Simulated demo with fictional accounts and usage, using the project's actual UI.*
+See the [screenshot gallery](docs/SCREENSHOTS.md) and [local browser demo](docs/demo/README.md).
+
 ## Features
 
 - Separate official Claude Desktop login directories.
@@ -89,15 +97,22 @@ Only clicks request quota. Local state polling and time-label repainting do not.
 
 ## Verification status
 
-Local verification on 2026-10-25 (America/Los_Angeles): **214 tests passed** — Python 118, Rust unit 63
-plus bridge 3, and Node 30. Formatting, Clippy and JavaScript syntax checks passed.
-The app was built and installed locally. Manual queries in the final installed app succeeded for three
+Latest offline source verification on 2026-10-25 (America/Los_Angeles): **220 tests passed** — Python 120,
+Rust unit 64 plus bridge 3, and Node 33. Formatting, Clippy and JavaScript syntax checks passed.
+Grok checked 77 file hashes and reran 15 Node tests against the preceding audit package, reporting three issues.
+The current source fixes the panel-lock status, background-activity parsing and batch counts for queries already
+running in another window. These fixes await independent re-review; see the
+[audit follow-up](docs/AUDIT-FOLLOWUP-20261025.md).
+
+The preceding `103dd9f` version passed **214 tests** and was built and installed locally.
+Manual queries in that installed app succeeded for three
 independently authorized accounts, showing both used percentages and their reset times. Row selection,
 single-account refresh, Refresh all, Settings management and opening an authorized independent CLI were checked.
-No real Desktop switch was executed in this round; its event routing is covered by offline tests.
+No real Desktop switch was executed in that round; its event routing is covered by offline tests.
+The audit fixes have not replaced that installed app. The browser demo and screenshots do not verify real accounts.
 
-These are implementer verification results. Independent review is pending, and official requests may still fail.
-See [docs/GROK-AUDIT-20261025.md](docs/GROK-AUDIT-20261025.md) for scope and reproduction commands.
+Implementer testing and independent review have separate scopes; official requests may still fail.
+See [docs/GROK-AUDIT-20261025.md](docs/GROK-AUDIT-20261025.md) for the preceding scope and reproduction commands.
 This update publishes source and documentation; it does not create a new GitHub Release.
 
 ## Build and update
