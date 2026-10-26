@@ -61,9 +61,14 @@ fn the_renderer_and_the_bridge_agree_on_its_methods() {
     let api = read("ui/api.js");
     let body = api.split("window.api = {").nth(1).unwrap();
     let exposed = all(r"(?m)^  (\w+):", body);
-    let pages = ["ui/common.js", "ui/launcher.js", "ui/settings.js"]
-        .map(read)
-        .join("\n");
+    let pages = [
+        "ui/common.js",
+        "ui/quota.js",
+        "ui/launcher.js",
+        "ui/settings.js",
+    ]
+    .map(read)
+    .join("\n");
     let used = all(r"\bapi\.(\w+)", &pages);
     assert_eq!(exposed, used);
 }

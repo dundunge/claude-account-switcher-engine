@@ -1,7 +1,9 @@
 # 从 Claude 读取额度 / Read quota inside Claude
 
-CASE 4.2.1 uses macOS Accessibility to read the quota panel that Claude itself renders.
-There is no separate usage login, HTTP usage client, browser-cookie import or OAuth refresh.
+This document describes the existing panel-only fallback. The current source also adds
+[manual multi-account queries](MANUAL-USAGE.md) through separately authorized official CLI scopes.
+The panel path uses macOS Accessibility to read the quota panel that Claude itself renders.
+This panel path has no separate usage login, HTTP usage client, browser-cookie import or OAuth refresh.
 Claude remains responsible for authenticating and obtaining its own usage data.
 
 ## Flow
@@ -22,17 +24,21 @@ Claude remains responsible for authenticating and obtaining its own usage data.
    of the account identity from Claude's config. Identity is checked before and after capture and whenever
    a saved observation is restored. No credential or chat text is saved.
 
-“Update usage records” uses the panel for running profiles and saved observations for closed profiles.
+With no independent CLI binding, users can read an open profile's panel or explicitly re-read saved records.
 Switching accounts is still a separate action. The local session sync engine remains version 0.3.0.
 
 ## Limits
 
 - A panel read is an observation, not proof that Claude has just refreshed its server-side quota.
 - Claude may retain stale UI values or change its labels and accessibility structure after an update.
-  An unrecognized panel returns an error and keeps the previous observation.
+  An unrecognized panel returns an error with no usage value for that refresh; the persisted observation
+  is left untouched so a later successful local read can still inspect it.
 - A closed account has no current UI to read. Its last value must remain labeled with its observation time.
 - Claude's history file may be much older than its panel. Re-reading it cannot make a new sample appear.
-- Relative reset notices are stored as text seen at the observation time, not interpreted as new reset dates.
+- Reset notices retain their original text. Recognized relative notices are anchored to the original observation
+  and displayed as estimated resets; repainting does not move the target time. Full dates, supported local
+  clocks and weekday notices show local reset dates in their tooltip. Unknown or ambiguous times stay unavailable.
+  Passed reset times request a manual query; they do not reset the sampled percentage to zero.
 - This version supports Claude Code's Usage popover on macOS. Other Claude views may require opening Code
   and its Usage control first. No automatic background UI clicking is scheduled.
 - macOS Accessibility is a broad permission. The implementation skips chat-message subtrees and text inputs,

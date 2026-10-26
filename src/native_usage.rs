@@ -179,6 +179,8 @@ fn normalize(rows: Vec<Row>, now: i64) -> Result<usage::Usage, &'static str> {
         source: "claude-ui".into(),
         fh_reset_at: None,
         sd_reset_at: None,
+        fh_reset_estimated: false,
+        sd_reset_estimated: false,
         fh_reset_text: None,
         sd_reset_text: None,
     };

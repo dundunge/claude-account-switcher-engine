@@ -49,6 +49,10 @@ pub struct Usage {
     pub source: String,
     pub fh_reset_at: Option<i64>,
     pub sd_reset_at: Option<i64>,
+    #[serde(default)]
+    pub fh_reset_estimated: bool,
+    #[serde(default)]
+    pub sd_reset_estimated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fh_reset_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,6 +196,8 @@ fn as_of_now(s: Sample) -> Usage {
         source: "local".into(),
         fh_reset_at: None,
         sd_reset_at: None,
+        fh_reset_estimated: false,
+        sd_reset_estimated: false,
         fh_reset_text: None,
         sd_reset_text: None,
     }
@@ -262,6 +268,8 @@ mod tests {
             source: "claude-ui".into(),
             fh_reset_at: None,
             sd_reset_at: None,
+            fh_reset_estimated: false,
+            sd_reset_estimated: false,
             fh_reset_text: None,
             sd_reset_text: None,
         }

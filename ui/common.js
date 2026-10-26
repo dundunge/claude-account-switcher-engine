@@ -146,35 +146,168 @@ function avatar (a, size = 36, live = false) {
 
 const level = p => (p >= 90 ? 'danger' : p >= 75 ? 'warn' : 'accent')
 const usageAgeMs = u => u ? Math.max(0, Date.now() - u.at) : 0
-const usageDisplayKey = u => u ? [u.at, u.fh, u.sd, u.source, u.fhResetAt, u.sdResetAt, u.fhResetText, u.sdResetText, Math.floor(usageAgeMs(u) / 60000)].join('/') : ''
+const usageDisplayKey = u => u ? [u.at, u.fh, u.sd, u.source, u.fhResetAt, u.sdResetAt, u.fhResetEstimated, u.sdResetEstimated, u.fhResetText, u.sdResetText, Math.floor(usageAgeMs(u) / 60000)].join('/') : ''
 const usageIsOld = u => u && usageAgeMs(u) > 10 * 60000
 const usageAge = u => u ? (u.source === 'claude-ui'
   ? tf('{0}读取 · Claude 面板', 'Claude panel · read {0}', fmtAgo(u.at))
-  : tf('{0}采样 · 本地', 'Local · {0}', fmtAgo(u.at))) + (usageIsOld(u) ? tr(' · 旧数据', ' · stale') : '') : tr('暂无额度记录', 'No usage data')
+  : u.source === 'claude-cli'
+    ? tf('{0}查询 · 官方 CLI', 'Official CLI · queried {0}', fmtAgo(u.at))
+    : tf('{0}采样 · 本地', 'Local · {0}', fmtAgo(u.at))) + (usageIsOld(u) ? tr(' · 旧数据', ' · stale') : '') : tr('暂无额度记录', 'No usage data')
+
+// The backend's version orders transitions across manual responses and status
+// polls. A slow poll must never restore a pre-failure reading. Transport errors
+// also remain empty until a new backend attempt is observed.
+function mergeQuotaStatus (previous, incoming, request) {
+  const next = { ...previous, ...incoming }
+  if ((previous.monitor?.version || 0) > (incoming.monitor?.version || 0)) {
+    next.monitor = previous.monitor
+    next.usage = previous.usage
+  }
+  if (request?.pending || (request?.bridgeFailed && (!next.monitor?.lastAttemptAt || next.monitor.lastAttemptAt < request.startedAt))) next.usage = null
+  if (next.monitor && next.monitor.status !== 'success') next.usage = null
+  return next
+}
 
 function usageTip (u) {
-  if (!u) return tr("暂无额度记录，待 Claude 生成本地采样。", "No quota sample has been recorded by Claude yet.")
+  if (!u) return tr('尚未获取当前额度，请手动刷新。', 'Current usage is unavailable. Refresh manually.')
   return tf('5 小时已用 {0}；周额度已用 {1}。{2}。百分比表示已使用的额度。', '5-hour usage: {0}; weekly usage: {1}. {2}. Percentages show used quota.',
     Number.isFinite(u.fh) ? `${u.fh}%` : tr('未知', 'unknown'), Number.isFinite(u.sd) ? `${u.sd}%` : tr('未知', 'unknown'), usageAge(u))
 }
 
-function quotaLine (label, value) {
+function quotaLine (label, value, reset = null) {
   const known = Number.isFinite(value)
   const tone = known && value >= 75 ? level(value) : ''
-  return h('span', { class: 'quota-line' },
+  const amount = known ? tf('已用 {0}%，剩余 {1}%', '{0}% used, {1}% remaining', value, 100 - value) : tr('未获取', 'Unknown')
+  return h('span', { class: reset ? 'quota-line quota-window' : 'quota-line' },
     h('span', { class: 'quota-top' }, h('span', {}, label),
-      h('b', { class: tone }, known ? tf("已用 {0}%", "{0}% used", value) : tr("未获取", "Unknown"))),
+      h('span', { class: 'quota-reading' },
+        reset ? h('span', { class: 'quota-reset-short', title: reset.title, tabindex: 0 }, reset.label) : null,
+        h('b', { class: tone, title: amount, 'aria-label': amount }, known ? (reset ? value + '%' : tf('已用 {0}%', '{0}% used', value)) : tr('未获取', 'Unknown')))),
     h('span', { class: `bar ${tone}`, role: 'progressbar', 'aria-label': tf("{0}已用", "{0} used", label),
       'aria-valuenow': known ? value : null, 'aria-valuemin': 0, 'aria-valuemax': 100,
       'aria-valuetext': known ? tf("已用 {0}%，剩余 {1}%", "{0}% used, {1}% remaining", value, 100 - value) : tr("未获取", "Unknown") },
     h('span', { style: { width: `${known ? value : 0}%` } })))
 }
 
+function quotaResetInfo (u, window) {
+  const raw = u?.[window + 'ResetText'] || ''
+  if (!Number.isFinite(u?.[window])) return { at: null, estimated: false, raw: '' }
+  const timestamp = u[window + 'ResetAt']
+  if (Number.isFinite(timestamp) && timestamp > 0 && Number.isFinite(new Date(timestamp).getTime())) {
+    return { at: timestamp, estimated: u[window + 'ResetEstimated'] === true, raw }
+  }
+  // Native panel caches preserve the original notice. Anchor relative text to
+  // the observation, never to the repaint time, and label it as an estimate.
+  const relative = raw.match(/^Resets?\s+in\s+(.+)$/i)
+  if (relative && Number.isFinite(u.at)) {
+    const unitSeconds = { d: 86400, h: 3600, m: 60, s: 1 }
+    const token = /(\d+)\s*(days?|d|hours?|hrs?|hr|h|minutes?|mins?|min|m|seconds?|secs?|sec|s)\b/gi
+    let seconds = 0
+    let found = false
+    const residue = relative[1].replace(token, (_, value, unit) => { seconds += Number(value) * unitSeconds[unit[0].toLowerCase()]; found = true; return '' })
+    if (found && /^[\s,]*(?:and[\s,]*)?$/i.test(residue) && seconds <= (window === 'fh' ? 5 * 3600 : 7 * 86400)) {
+      return { at: u.at + seconds * 1000, estimated: true, raw }
+    }
+  }
+  // Accept a complete local date from the native panel; never let Date.parse
+  // guess locale-specific month/day ordering or manufacture a missing date.
+  const absolute = raw.match(/^(?:(?:Resets?|重置(?:时间|于)?)\s*[:：]?\s*)?(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/i)
+  if (absolute) {
+    const [, year, month, day, hour, minute] = absolute.map((v, i) => i ? Number(v) : v)
+    const second = Number(absolute[6] || 0)
+    const date = new Date(year, month - 1, day, hour, minute, second)
+    const sameClock = other => other.getFullYear() === year && other.getMonth() === month - 1 && other.getDate() === day && other.getHours() === hour && other.getMinutes() === minute && other.getSeconds() === second
+    if (sameClock(date)) {
+      const offsets = [new Date(date.getTime() - 86400000), new Date(date.getTime() + 86400000)].map(d => d.getTimezoneOffset())
+      const ambiguous = offsets.some(offset => offset !== date.getTimezoneOffset() && sameClock(new Date(date.getTime() + (offset - date.getTimezoneOffset()) * 60000)))
+      if (!ambiguous) return { at: date.getTime(), estimated: false, raw }
+    }
+  }
+  // Claude's compact native panel can use "Resets Tue 8:00 PM" or a
+  // session clock. Infer the date from the recorded observation only.
+  let body = raw.replace(/^Resets?\s+/i, '')
+  const zone = body.match(/\s*\(([^()]+)\)$/)
+  if (zone) {
+    if (zone[1] !== Intl.DateTimeFormat().resolvedOptions().timeZone) return { at: null, estimated: false, raw }
+    body = body.slice(0, zone.index)
+  }
+  const weekday = body.match(/^(Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?)\s+(?:at\s+)?(.+)$/i)
+  const clock = (weekday ? weekday[2] : body.replace(/^at\s+/i, '')).match(/^(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/i)
+  if (clock && (clock[2] || clock[3]) && Number.isFinite(u.at) && (window === 'sd' ? !!weekday : !weekday)) {
+    let hour = Number(clock[1])
+    const minute = Number(clock[2] || 0)
+    if (clock[3]) {
+      if (hour < 1 || hour > 12) return { at: null, estimated: false, raw }
+      hour = hour % 12 + (clock[3].toLowerCase() === 'pm' ? 12 : 0)
+    }
+    const observed = new Date(u.at)
+    const offset = weekday ? (['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'].indexOf(weekday[1].slice(0, 3).toLowerCase()) - observed.getDay() + 7) % 7 : 0
+    const candidates = new Set()
+    for (const days of [offset, offset + (weekday ? 7 : 1)]) {
+      const day = new Date(observed.getFullYear(), observed.getMonth(), observed.getDate() + days)
+      const date = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hour, minute)
+      if (date.getDate() !== day.getDate() || date.getHours() !== hour || date.getMinutes() !== minute) continue
+      const offsets = [date, new Date(date.getTime() - 86400000), new Date(date.getTime() + 86400000)].map(d => d.getTimezoneOffset())
+      for (const zoneOffset of offsets) {
+        const at = date.getTime() + (zoneOffset - date.getTimezoneOffset()) * 60000
+        const alternative = new Date(at)
+        const delta = at - u.at
+        if (alternative.getDate() === day.getDate() && alternative.getHours() === hour && alternative.getMinutes() === minute && delta >= -60000 && delta <= (window === 'fh' ? 5 * 3600000 : 7 * 86400000) + 60000) candidates.add(at)
+      }
+    }
+    if (candidates.size === 1) return { at: [...candidates][0], estimated: false, raw }
+  }
+  return { at: null, estimated: false, raw }
+}
+
+function quotaResetLabel (u, window) {
+  const reset = quotaResetInfo(u, window)
+  if (reset.at === null) return tr('重置时间：未获取', 'Reset time: unavailable')
+  const date = new Date(reset.at)
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'shortOffset'
+  }).formatToParts(date)
+  const part = type => parts.find(p => p.type === type)?.value || ''
+  const time = part('year') + '/' + part('month') + '/' + part('day') + ' ' + part('hour') + ':' + part('minute')
+  const label = reset.estimated ? tr('预计重置', 'Estimated reset') : tr('重置时间', 'Reset time')
+  const elapsed = reset.at <= Date.now() ? tr(' · 时间已过，请手动查询', ' · time passed; query again') : ''
+  return label + '：' + time + ' (' + zone + ', ' + part('timeZoneName') + ')' + elapsed
+}
+
+function quotaResetShort (u, window) {
+  const reset = quotaResetInfo(u, window)
+  if (reset.at === null) return tr('重置时间未获取', 'Reset time unavailable')
+  if (reset.at <= Date.now()) return tr('重置时间已过 · 请查询', 'Reset time passed · query again')
+  if (window === 'fh') {
+    const minutes = Math.ceil((reset.at - Date.now()) / 60000)
+    const hours = Math.floor(minutes / 60)
+    const rest = minutes % 60
+    const duration = [hours ? tf('{0} 小时', '{0} hr', hours) : '', rest ? tf('{0} 分钟', '{0} min', rest) : ''].filter(Boolean).join(' ')
+    return reset.estimated ? tf('预计 {0}后重置', 'Est. reset in {0}', duration) : tf('{0}后重置', 'Resets in {0}', duration)
+  }
+  const time = new Intl.DateTimeFormat(I18N.language, { weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(reset.at))
+  return reset.estimated ? tf('预计 {0} 重置', 'Est. reset {0}', time) : tf('{0} 重置', 'Resets {0}', time)
+}
+
+function quotaWindow (label, u, window) {
+  const reset = quotaResetInfo(u, window)
+  const raw = reset.raw ? '\n' + tf('读取时提示：{0}', 'Notice when read: {0}', reset.raw) : ''
+  return quotaLine(label, u?.[window], { label: quotaResetShort(u, window), title: quotaResetLabel(u, window) + raw })
+}
+
 /** Explicit labels and values: neither limit is hidden behind a combined peak. */
-function usageSummary (u) {
+function usageSummary (u, state = null) {
+  const note = state && state.status !== 'success' ? state.label : usageAge(u)
+  const window = (label, key) => {
+    const reset = quotaResetInfo(u, key)
+    return h('span', { class: 'summary-window' }, quotaLine(label, u?.[key]),
+      h('span', { class: 'summary-reset', tabindex: 0, title: quotaResetLabel(u, key) + (reset.raw ? '\n' + reset.raw : '') }, quotaResetShort(u, key)))
+  }
   return h('span', { class: `usage-summary${usageIsOld(u) ? ' old' : ''}`, title: usageTip(u) },
-    quotaLine(tr("5 小时", "5 hours"), u?.fh), quotaLine(tr("周额度", "Weekly"), u?.sd),
-    h('span', { class: 'usage-age' }, usageAge(u)))
+    window(tr('5 小时', '5 hours'), 'fh'), window(tr('周额度', 'Weekly'), 'sd'),
+    h('span', { class: `usage-age${state && !['success', 'in_progress'].includes(state.status) ? ' warn' : ''}`, role: 'status', title: state?.code ? quotaError(state.code) : usageAge(u) }, note))
 }
 
 // ------------------------------------------------------------ formatting ---

@@ -1,10 +1,11 @@
 'use strict'
 
-// The settings window: six sections down the side, one shown at a time, plus
+// The settings window: one section shown at a time, plus
 // the archived profiles, reached from General.
 
 const sections = () => [
   { id: 'general', label: tr("通用", "General"), icon: 'sliders', lede: tr("设置启动方式和账号列表顺序。", "How CASE starts, and how your accounts are listed.") },
+  { id: 'usage', label: tr('额度查询', 'Usage queries'), icon: 'refresh', lede: tr('主页可直接刷新全部账号。这里可逐账号查询、管理授权和打开独立 CLI。仅手动查询。', 'Refresh every account from the home page. Query individual accounts, manage authorization, and open account CLIs here. Queries are manual only.') },
   { id: 'shortcut', label: tr("快捷键", "Shortcut"), icon: 'keyboard', lede: tr("在任意应用中调出账号列表。", "Summon the launcher from any app.") },
   { id: 'presence', label: IS_WIN ? tr("通知区域", "Notification area") : tr("菜单栏与程序坞", "Menu bar & Dock"), icon: 'window', lede: tr("选择 CASE 的显示位置，始终保留一个可打开的入口。", "Choose where CASE lives. One place always stays, so there is a way back in.") },
   { id: 'updates', label: tr("更新", "Updates"), icon: 'download', lede: tr("更新仅检查 dundunge/claude-account-switcher-engine。", "Updates are checked only in dundunge/claude-account-switcher-engine.") },
@@ -16,6 +17,7 @@ const T = {
   section: window.CASE_SECTION || 'general',
   settings: null,
   archived: null,
+  accounts: null,
   health: null,
   update: null,     // the last check's answer
   upd: 'idle',      // idle | checking | downloading | restarting
@@ -24,12 +26,14 @@ const T = {
 
 const $nav = document.getElementById('nav')
 const $content = document.getElementById('content')
+const quota = createQuotaController({ getAccounts: () => T.accounts || [], onChange: paintQuota })
 
 function go (section) {
   T.section = section
   render()
   $content.scrollTop = 0
   if (section === 'updates' && !T.update && T.upd === 'idle') check()
+  if (section === 'usage') pullQuotaStatus()
 }
 
 function render () {
@@ -68,6 +72,13 @@ function renderNav () {
 const section = (label, ...kids) => h('section', { class: 'stack', 'aria-label': label }, h('h2', { class: 'section-label' }, label), ...kids)
 
 const VIEWS = {
+  usage () {
+    return [h('div', { class: 'usage-page' }, quotaClockHint(),
+      T.accounts === null ? h('p', { class: 'help' }, tr('正在读取账号列表…', 'Loading accounts…'))
+        : T.accounts.length ? T.accounts.map(account => quota.card(account, true))
+          : h('p', { class: 'help' }, tr('请先在主页添加账号。', 'Add an account on the home page first.')))]
+  },
+
   general () {
     const s = T.settings
     return [
@@ -377,8 +388,52 @@ function archivedItem (r) {
 async function loadArchived () {
   const res = await api.list()
   T.archived = res.archived || []
-  if (T.section === 'general' || T.section === 'archived') render()
+  const previous = new Map((T.accounts || []).map(account => [account.id, account]))
+  T.accounts = (res.accounts || []).map(account => mergeQuotaStatus(previous.get(account.id) || {}, account, quota.requests.get(account.id)))
+  if (['general', 'archived', 'usage'].includes(T.section)) render()
+  await pullQuotaStatus()
 }
+
+function paintQuota (id) {
+  if (T.section !== 'usage') return
+  $content.querySelectorAll('[data-usage-id]').forEach(card => {
+    const account = T.accounts?.find(account => account.id === card.dataset.usageId)
+    if (account && (!id || account.id === id)) card.replaceWith(quota.card(account, true))
+  })
+}
+
+let pullingQuotaStatus = false
+async function pullQuotaStatus () {
+  if (pullingQuotaStatus || T.accounts === null) return
+  pullingQuotaStatus = true
+  try {
+    const status = new Map((await api.status()).map(account => [account.id, account]))
+    const changed = []
+    T.accounts = T.accounts.map(account => {
+      const incoming = status.get(account.id)
+      if (!incoming) return account
+      const request = quota.requests.get(account.id)
+      const next = mergeQuotaStatus(account, incoming, request)
+      if (request?.bridgeFailed && next.monitor?.lastAttemptAt >= request.startedAt) quota.requests.delete(account.id)
+      if (account.running !== next.running || account.monitor?.version !== next.monitor?.version || usageDisplayKey(account.usage) !== usageDisplayKey(next.usage)) changed.push(account.id)
+      return next
+    })
+    changed.forEach(id => paintQuota(id))
+  } catch {
+    // Polling local status is not a new usage attempt or a usage failure.
+  } finally {
+    pullingQuotaStatus = false
+  }
+}
+
+// These read CASE's local state and repaint age/reset text. They never issue a
+// usage query, authorize an account, or open a CLI.
+setInterval(() => {
+  if (!document.hidden && T.section === 'usage') pullQuotaStatus()
+}, 2500)
+setInterval(() => {
+  if (!document.hidden && T.section === 'usage') paintQuota()
+}, 30000)
 
 // --------------------------------------------------------------- updates ---
 

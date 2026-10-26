@@ -57,6 +57,21 @@ def build(root: Path, app: Path | None) -> dict:
             "paths": [str(path) for path in native],
             "sha256": {str(path): sha(path) for path in native},
         },
+        "usage_monitor": {
+            "platform": "macOS",
+            "provider": "official Claude Code /usage",
+            "query_mode": "manual_only",
+            "sha256": {
+                str(path): sha(path) for path in [
+                    root / "src/usage_monitor.rs",
+                    root / "tools/claude_usage_probe.py",
+                    root / "src/usage.rs",
+                    root / "ui/common.js",
+                    root / "ui/launcher.js",
+                    root / "ui/styles.css",
+                ]
+            },
+        },
     }
 
 

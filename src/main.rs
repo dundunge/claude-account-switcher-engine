@@ -20,6 +20,7 @@ mod store;
 mod tray;
 mod update;
 mod usage;
+mod usage_monitor;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -86,6 +87,7 @@ struct Status {
     sessions: usize,
     exists: bool,
     usage: Option<usage::Usage>,
+    monitor: usage_monitor::Snapshot,
 }
 
 fn session_count(dir: &Path) -> usize {
@@ -108,12 +110,16 @@ fn probe(accounts: &[Account]) -> Vec<Status> {
         let probes: Vec<_> = accounts
             .iter()
             .map(|a| {
-                s.spawn(move || Status {
-                    id: a.id.clone(),
-                    running: platform::is_running(&a.dir),
-                    sessions: session_count(&a.dir),
-                    exists: a.dir.exists(),
-                    usage: native_usage::read(&a.id, &a.dir),
+                s.spawn(move || {
+                    let monitor = usage_monitor::snapshot(a);
+                    Status {
+                        id: a.id.clone(),
+                        running: platform::is_running(&a.dir),
+                        sessions: session_count(&a.dir),
+                        exists: a.dir.exists(),
+                        usage: monitor.usage.clone(),
+                        monitor,
+                    }
                 })
             })
             .collect();
@@ -904,6 +910,7 @@ fn app_open_link(which: String) {
         "accessibility" => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into()
         }
+        "claude-code" => "https://code.claude.com/docs/en/setup".into(),
         _ => return,
     };
     platform::open_url(&url);
@@ -967,16 +974,79 @@ fn settings_set_language(app: AppHandle, language: String) -> Value {
 #[tauri::command(async)]
 fn usage_refresh(id: String, native: bool) -> Value {
     let Some(account) = find(&id) else {
-        return error(locale::tr("未找到账号。", "Account not found."));
+        return json!({
+            "ok": false,
+            "status": "failed",
+            "code": "ACCOUNT_NOT_FOUND",
+            "usage": Value::Null,
+            "error": locale::tr("未找到账号。", "Account not found.")
+        });
     };
+    if usage_monitor::snapshot(&account).configured {
+        let monitor = usage_monitor::refresh(&account);
+        return json!({ "ok": monitor.status == "success", "status": monitor.status, "code": monitor.code, "usage": monitor.usage, "monitor": monitor });
+    }
     if !native {
         usage::invalidate(&account.dir);
-        return json!({ "ok": true, "usage": native_usage::read(&account.id, &account.dir), "localOnly": true });
+        let value = native_usage::read(&account.id, &account.dir);
+        let monitor = usage_monitor::record_manual(&account, "success", None, value.clone());
+        return json!({ "ok": true, "status": "success", "usage": value, "monitor": monitor, "localOnly": true });
     }
     match native_usage::capture(&account) {
-        Ok(value) => json!({ "ok": true, "usage": value }),
+        Ok(value) => {
+            let monitor =
+                usage_monitor::record_manual(&account, "success", None, Some(value.clone()));
+            json!({ "ok": true, "status": "success", "usage": value, "monitor": monitor })
+        }
         Err(code) => {
-            json!({ "ok": false, "code": code, "usage": native_usage::read(&account.id, &account.dir) })
+            let status = match code {
+                "DESKTOP_IDENTITY_MISSING" | "IDENTITY_CHANGED" => "auth_failed",
+                "REFRESH_IN_PROGRESS" => "in_progress",
+                "REFRESH_TIMEOUT" | "TIMEOUT" => "timeout",
+                "ACCOUNT_NOT_OPEN"
+                | "PROFILE_PROCESS_AMBIGUOUS"
+                | "PANEL_UNAVAILABLE"
+                | "PANEL_UNRECOGNIZED" => "unavailable",
+                "ACCESSIBILITY_REQUIRED" | "SAVE_FAILED" | "PLATFORM_UNSUPPORTED" => "failed",
+                _ => "failed",
+            };
+            // A failed live read is never allowed to masquerade as a fresh
+            // observation.  The UI must clear the displayed percentages and
+            // show the explicit status; the persisted cache remains untouched
+            // for the next successful probe.
+            let monitor = usage_monitor::record_manual(&account, status, Some(code), None);
+            json!({ "ok": false, "status": status, "code": code, "usage": Value::Null, "monitor": monitor })
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn usage_monitor_connect(id: String) -> Value {
+    let Some(account) = find(&id) else {
+        return json!({ "ok": false, "status": "failed", "code": "ACCOUNT_NOT_FOUND", "usage": Value::Null });
+    };
+    match usage_monitor::connect(&account) {
+        Ok(monitor) => json!({ "ok": true, "monitor": monitor }),
+        Err(code) => {
+            json!({ "ok": false, "status": "unavailable", "code": code, "usage": Value::Null })
+        }
+    }
+}
+
+#[tauri::command(async)]
+fn usage_monitor_setup(id: String) -> Value {
+    let Some(account) = find(&id) else {
+        return json!({ "ok": false, "status": "failed", "code": "ACCOUNT_NOT_FOUND", "usage": Value::Null });
+    };
+    match usage_monitor::setup(&account) {
+        Ok(monitor) => json!({ "ok": true, "monitor": monitor }),
+        Err(code) => {
+            let status = if code == "CLI_IDENTITY_MISMATCH" {
+                "auth_failed"
+            } else {
+                "unavailable"
+            };
+            json!({ "ok": false, "status": status, "code": code, "usage": Value::Null })
         }
     }
 }
@@ -1559,6 +1629,8 @@ fn main() {
             settings_get,
             settings_set_language,
             usage_refresh,
+            usage_monitor_connect,
+            usage_monitor_setup,
             settings_set_hotkey,
             settings_set_presentation,
             settings_set_sorting,

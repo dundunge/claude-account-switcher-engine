@@ -37,6 +37,8 @@ window.api = {
   getSettings: () => invoke('settings_get'),
   setLanguage: language => invoke('settings_set_language', { language }),
   refreshUsage: (id, native = true) => invoke('usage_refresh', { id, native }),
+  connectUsageMonitor: id => invoke('usage_monitor_connect', { id }),
+  setupUsageMonitor: id => invoke('usage_monitor_setup', { id }),
   setHotkey: (hotkey, enabled) => invoke('settings_set_hotkey', { hotkey, enabled }),
   setPresentation: (menuBar, hideDock) => invoke('settings_set_presentation', { menuBar, hideDock }),
   setSorting: sortByRecent => invoke('settings_set_sorting', { sortByRecent }),

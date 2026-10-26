@@ -29,8 +29,8 @@ let rowEls = []
 let launching = false
 let activeLaunchId = null
 let rerenderEditor = null
-const quotaRequests = new Map()
-let refreshingAll = false
+const quota = createQuotaController({ getAccounts: () => S.accounts, onChange: paintQuota })
+const quotaRequests = quota.requests
 const MAX_ACCOUNTS = 8
 
 const chromeName = dir => S.chromeProfiles.find(p => p.dir === dir)?.name || dir
@@ -43,7 +43,6 @@ const VIEWS = {
   account: viewAccount,
   remove: viewRemove,
   health: viewHealth,
-  usage: viewUsage,
   setup: viewSetup
 }
 
@@ -67,7 +66,7 @@ function renderBar () {
     ? h('button', { type: 'button', class: 'btn quiet back', onclick: back }, icon('back', 16, 2), tr("账号", "Accounts"))
     : '')
   $tools.replaceChildren(
-    h('button', { type: 'button', class: 'btn quiet', onclick: () => show('usage'), title: tr('查看和刷新账号额度', 'View and refresh account usage') }, icon('refresh', 15), tr('额度', 'Usage')),
+    S.view === 'list' ? h('button', { type: 'button', class: 'btn quiet', disabled: quota.busy || !S.accounts.length, onclick: () => quota.refreshAll(), title: tr('直接刷新全部账号的额度', 'Refresh usage for every account') }, icon('refresh', 15), quota.refreshingAll ? tr('刷新中…', 'Refreshing…') : tr('刷新全部', 'Refresh all')) : '',
     healthChip(),
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': tr("设置", "Settings"), title: tf("设置 ({0})", "Settings ({0})", combo(',')), onclick: () => api.openSettings() }, icon('sliders', 17))
   )
@@ -90,7 +89,7 @@ function healthChip () {
 function viewList () {
   searchInput = h('input', {
     type: 'text',
-    placeholder: tr("选择账号…", "Open an account…"),
+    placeholder: tr("搜索账号…", "Search accounts…"),
     spellcheck: 'false',
     autocomplete: 'off',
     'aria-label': tr("搜索账号", "Search accounts"),
@@ -98,12 +97,12 @@ function viewList () {
     value: S.query,
     oninput: e => { S.query = e.target.value; S.sel = 0; renderRows() }
   })
-  rowsEl = h('div', { class: 'list', id: 'accounts', role: 'listbox', 'aria-label': tr("账号", "Accounts") })
+  rowsEl = h('div', { class: 'list', id: 'accounts', role: 'list', 'aria-label': tr("账号", "Accounts") })
   $view.replaceChildren(
     S.claude.installed ? '' : h('div', { class: 'notice danger', role: 'alert' }, icon('alert', 16, 2), h('span', {}, S.claude.hint)),
     h('label', { class: 'search' }, icon('search', 16, 2), searchInput, h('kbd', {}, combo('K'))),
     rowsEl,
-    h('div', { class: 'notice' }, h('span', {}, tr("切号前会正常退出 Claude 并同步本地会话。长任务请先完成文件交接。", "Switching quits Claude normally and syncs local sessions. Write a file handoff before switching a long task."))),
+    h('div', { class: 'notice' }, h('span', {}, tr("点击账号行仅选中；点击“切换”才会正常退出 Claude 并同步会话。长任务请先完成文件交接。", "Click a row to select it. Switch quits Claude normally and syncs sessions. Write a file handoff before switching a long task."))),
     S.accounts.length >= MAX_ACCOUNTS
       ? h('div', { class: 'notice warn', role: 'status' }, tr(`最多支持 ${MAX_ACCOUNTS} 个账号，请先归档或移除一个账号。`, `CASE supports at most ${MAX_ACCOUNTS} accounts. Archive or remove one first.`))
       : '',
@@ -113,7 +112,7 @@ function viewList () {
         ? h('button', { type: 'button', class: 'btn quiet', onclick: () => api.openSettings('archived') }, icon('archive', 15), tf("{0} 个已归档", "{0} archived", S.archivedCount))
         : '',
       h('span', { class: 'grow' }),
-      h('span', { class: 'hint' }, h('kbd', {}, '↵'), tr("打开", "Open")),
+      h('span', { class: 'hint' }, h('kbd', {}, '↵'), tr("切换", "Switch")),
       h('button', { type: 'button', class: 'btn quiet', onclick: openPanel }, h('kbd', {}, combo('K')), tr("操作", "Actions")))
   )
   renderRows()
@@ -138,42 +137,46 @@ function subtitle (a) {
 
 function renderRows () {
   if (!rowsEl) return
+  const focused = rowsEl.contains(document.activeElement) ? document.activeElement.dataset : null
   const list = filtered()
   if (S.sel >= list.length) S.sel = Math.max(0, list.length - 1)
   rowEls = list.map((a, i) => row(a, i))
   rowsEl.replaceChildren(...rowEls)
   if (!list.length) rowsEl.append(emptyState())
-  paintSel()
+  paintSel(false)
+  if (focused?.action && focused.accountId) {
+    const row = rowEls.find(el => el.dataset.accountId === focused.accountId)
+    row?.querySelector(`[data-action="${focused.action}"]`)?.focus()
+  }
 }
 
 function row (a, i) {
   const key = a.idx < 9 ? combo(String(a.idx + 1)) : ''
-  return h('button', {
-    type: 'button',
+  const select = () => { S.sel = i; paintSel(false) }
+  const state = quota.state(a)
+  return h('div', {
     class: 'row',
-    role: 'option',
+    role: 'listitem',
     id: `acct-${a.id}`,
-    onclick: () => launch(a),
-    // Selection follows the pointer, as in any palette; a scroll under a still
-    // pointer moves nothing.
-    onmousemove: e => {
-      if ((e.movementX || e.movementY) && S.sel !== i) { S.sel = i; paintSel(false) }
-    },
-    oncontextmenu: e => { e.preventDefault(); S.sel = i; paintSel(false); openPanel() }
+    dataset: { accountId: a.id },
+    'aria-label': a.name,
+    onclick: select,
+    onfocusin: select,
+    oncontextmenu: e => { e.preventDefault(); select(); openPanel() }
   },
   avatar(a, 36, a.running),
-  h('span', { class: 'row-text' }, h('span', { class: 'row-name' }, a.name), h('span', { class: 'row-sub' }, subtitle(a))),
-  usageSummary(a.usage),
-  h('kbd', { dataset: { key } }, key))
+  h('span', { class: 'row-text' }, h('span', { class: 'row-name', title: a.name }, a.name), h('span', { class: 'row-sub', title: subtitle(a) }, subtitle(a))),
+  usageSummary(a.usage, state),
+  h('div', { class: 'row-actions' },
+    h('button', { type: 'button', class: 'icon-btn row-refresh', disabled: state.pending || quota.refreshingAll, dataset: { action: 'refresh', accountId: a.id }, title: tf('仅刷新 {0} 的额度', 'Refresh usage for {0} only', a.name), 'aria-label': tf('刷新 {0} 的额度', 'Refresh usage for {0}', a.name), onclick: e => { e.stopPropagation(); select(); return quota.refresh(a.id) } }, icon('refresh', 15)),
+    h('button', { type: 'button', class: 'btn account-switch', disabled: launching, dataset: { action: 'switch', accountId: a.id }, title: tf('切换到 {0} ({1})', 'Switch to {0} ({1})', a.name, key), 'aria-label': tf('切换到 {0}', 'Switch to {0}', a.name), onclick: e => { e.stopPropagation(); select(); return launch(a) } }, tr('切换', 'Switch'))))
 }
 
 function paintSel (scroll = true) {
   rowEls.forEach((el, i) => {
     const on = i === S.sel
     el.classList.toggle('selected', on)
-    el.setAttribute('aria-selected', String(on))
-    const k = el.querySelector('kbd')
-    k.textContent = on ? '↵' : k.dataset.key
+    el.setAttribute('aria-current', String(on))
   })
   const cur = rowEls[S.sel]
   if (cur && scroll) cur.scrollIntoView({ block: 'nearest' })
@@ -194,6 +197,7 @@ async function launch (a) {
   if (launching) return toast(tr("正在切换账号，请稍候。", "An account switch is in progress. Please wait."))
   launching = true
   activeLaunchId = a.id
+  if (S.view === 'list') renderRows()
   toast(tr("等待 Claude 退出…", "Waiting for Claude to quit…"))
   try {
     closePanel()
@@ -207,6 +211,7 @@ async function launch (a) {
   } finally {
     launching = false
     activeLaunchId = null
+    if (S.view === 'list') renderRows()
   }
 }
 
@@ -230,7 +235,7 @@ async function quit (a) {
 
 function actionsFor (a) {
   return [
-    { label: a.running ? tr("显示窗口", "Bring to front") : tr("在 Claude 中打开", "Open in Claude"), icon: 'open', key: '↵', run: () => launch(a) },
+    { label: tr('切换账号', 'Switch account'), icon: 'open', key: '↵', run: () => launch(a) },
     { label: tr("编辑名称、图标和颜色…", "Edit name, icon and colour…"), icon: 'pencil', key: combo('E'), run: () => show('account', { id: a.id }) },
     { label: a.chrome?.dir ? tf("Chrome 配置 · {0}", "Chrome profile · {0}", chromeName(a.chrome.dir)) : tr("关联 Chrome 配置…", "Pair a Chrome profile…"), icon: 'globe', key: combo('G'), run: () => show('account', { id: a.id, focus: 'chrome' }) },
     { label: tf("在{0}中显示", "Show in {0}", fileManager()), icon: 'folder', key: combo('R', { shift: true }), run: () => api.reveal(a.id) },
@@ -364,7 +369,7 @@ function viewAccount ({ id, isNew, name: preset = '', focus, draft }) {
 
   let chromeCard = null
   if (!isNew) {
-    parts.push(usageCard(a))
+    parts.push(h('div', { class: 'card' }, settingRow(tr('额度查询', 'Usage queries'), tr('主页刷新全部账号；在设置中逐账号查询、授权或打开独立 CLI。', 'Refresh all accounts from the home page. Query one account, connect usage, or open its CLI in Settings.'), h('button', { type: 'button', class: 'btn', onclick: () => api.openSettings('usage') }, tr('打开设置', 'Open settings')))))
     chromeCard = h('section', { class: 'card', 'aria-label': 'Chrome' }, h('div', { class: 'card-row' }, h('span', { class: 'help' }, tr("正在查找 Chrome 配置…", "Looking for Chrome profiles…"))))
     parts.push(chromeCard, storageCard(a))
     loadChrome(a, chromeCard)
@@ -390,82 +395,15 @@ function viewAccount ({ id, isNew, name: preset = '', focus, draft }) {
   else { nameInput.focus(); nameInput.select() }
 }
 
-function quotaError (code) {
-  const messages = {
-    REFRESH_IN_PROGRESS: tr('另一次面板读取正在进行，请稍候。', 'Another panel read is in progress. Please wait.'),
-    ACCESSIBILITY_REQUIRED: tr('请在系统设置 → 隐私与安全性 → 辅助功能中允许 CASE 读取 Claude 界面，然后重试。此权限只需为 CASE 配置一次，各账号不用重复登录。', 'Allow CASE in System Settings → Privacy & Security → Accessibility, then retry. This is one permission for CASE; accounts need no extra sign-in.'),
-    ACCOUNT_NOT_OPEN: tr('此账号未打开，保留上次读数。切换到它后可读取当前额度。', 'This account is closed. Its last reading is retained; open it to read current usage.'),
-    DESKTOP_IDENTITY_MISSING: tr('请先在这个账号的 Claude 窗口完成登录。', 'Sign in to this account in Claude first.'),
-    IDENTITY_CHANGED: tr('读取期间登录账号发生变化，本次读数未保存。请重试。', 'The signed-in account changed during the read. This observation was not saved. Try again.'),
-    PROFILE_PROCESS_AMBIGUOUS: tr('无法唯一确认该账号的 Claude 进程，已停止读取。', 'Could not uniquely identify this account’s Claude process. Reading stopped.'),
-    PANEL_UNAVAILABLE: tr('未找到 Claude 的额度入口。请先打开 Claude 的 Code 会话及右下角 Usage 面板，再重试。', 'Claude’s usage control was not found. Open a Code session and its Usage panel at the bottom right, then retry.'),
-    PANEL_UNRECOGNIZED: tr('未识别到额度面板中的数字，旧读数已保留。请在 Claude 中查看额度。', 'The quota panel’s numbers were not recognized. The previous reading is retained. View usage in Claude.'),
-    SAVE_FAILED: tr('无法保存面板读数，请检查本地磁盘。', 'Could not save the panel observation. Check the local disk.'),
-    PLATFORM_UNSUPPORTED: tr('Claude 面板读取目前只支持 macOS。', 'Reading Claude’s panel currently supports macOS only.')
-  }
-  return (messages[code] || tr('未能更新额度，旧读数已保留。', 'Usage could not be updated. The previous reading is retained.')) + ` (${code})`
+function paintQuota () {
+  renderBar()
+  if (S.view === 'list') renderRows()
 }
 
-function usageCard (account, named = false) {
-  const u = account.usage
-  const request = quotaRequests.get(account.id) || {}
-  const reset = (label, text) => text ? h('p', { class: 'help quota-reset' }, tf('读取时的{0}提示：{1}', '{0} notice when read: {1}', label, text)) : ''
-  return h('section', { class: 'card usage-card', dataset: { usageId: account.id, named: String(named) }, 'aria-label': named ? account.name : tr('订阅额度', 'Plan usage') },
-    h('div', { class: 'usage-line' }, h('div', { class: 'top' }, h('b', {}, named ? account.name : tr('订阅额度', 'Plan usage')), h('span', { class: 'help' }, usageAge(u)))),
-    quotaLine(tr('5 小时额度', '5-hour limit'), u?.fh), reset(tr('5 小时', '5-hour limit'), u?.fhResetText),
-    quotaLine(tr('周额度', 'Weekly limit'), u?.sd), reset(tr('周额度', 'Weekly limit'), u?.sdResetText),
-    h('p', { class: 'help' }, account.running ? tr('直接读取此账号的 Claude 额度面板。百分比为已用比例；读取时间不代表服务器刚刚更新。', 'Read this account’s Claude quota panel directly. Percentages show used quota; read time is not a server update timestamp.') : tr('账号未打开，显示上次读数及其时间。切换到这个账号后才能读取当前面板。', 'This account is closed. Showing its last observation and time; open the account to read its current panel.')),
-    h('div', { class: 'quota-actions' },
-      h('button', { type: 'button', class: 'btn', disabled: request.pending, onclick: () => refreshQuota(account.id, false), title: tr('重读 Claude 保存的历史文件与 CASE 上次面板读数', 'Re-read Claude’s saved history and CASE’s last panel observation') }, icon('refresh', 14), tr('重读本地记录', 'Read saved records')),
-      h('button', { type: 'button', class: 'btn primary', disabled: request.pending || !account.running, onclick: () => refreshQuota(account.id), title: tr('可能短暂打开 Claude 的额度弹窗，读取后恢复；不会切号', 'May briefly open Claude’s quota popover and close it after reading; does not switch accounts') }, request.pending ? tr('读取中…', 'Reading…') : tr('从 Claude 读取', 'Read from Claude')),
-      request.code === 'ACCESSIBILITY_REQUIRED' ? h('button', { type: 'button', class: 'btn quiet', onclick: () => api.openLink('accessibility') }, tr('打开辅助功能设置', 'Open Accessibility settings')) : ''),
-    request.code ? h('p', { class: 'help warn', role: 'status' }, quotaError(request.code)) : '',
-    request.message ? h('p', { class: 'help', role: 'status' }, request.localOnly ? tr('已重读本地记录；原始采样时间保留。', 'Saved records re-read; their original timestamps are retained.') : tr('已读取 Claude 自己的额度面板。', 'Read Claude’s own quota panel.')) : '')
-}
-
-function paintQuota (id) {
-  if (S.view === 'list') return renderRows()
-  document.querySelectorAll('[data-usage-id]').forEach(card => {
-    const account = findAccount(card.dataset.usageId)
-    if (account && (!id || account.id === id)) card.replaceWith(usageCard(account, card.dataset.named === 'true'))
-  })
-}
-
-// Age is derived from the original observation timestamp.  Repaint while the
-// page is visible so "多久前读取" and the stale marker do not wait for another
-// account probe or a manual refresh.
+// Repaint relative reset times and sample age without making usage requests.
 setInterval(() => {
-  if (S.view === 'usage' || S.view === 'account') paintQuota()
+  if (S.view === 'list') renderRows()
 }, 30000)
-
-async function refreshQuota (id, native = true) {
-  if (quotaRequests.get(id)?.pending) return
-  quotaRequests.set(id, { pending: true })
-  paintQuota(id)
-  try {
-    const result = await api.refreshUsage(id, native)
-    const account = findAccount(id)
-    if (account && Object.hasOwn(result, 'usage')) account.usage = result.usage
-    quotaRequests.set(id, { pending: false, code: result.ok ? null : result.code || 'REFRESH_FAILED', message: result.ok, localOnly: result.localOnly })
-  } catch {
-    quotaRequests.set(id, { pending: false, code: 'HELPER_FAILED' })
-  }
-  paintQuota(id)
-}
-
-function viewUsage () {
-  $view.replaceChildren(h('div', { class: 'scroll usage-page' },
-    h('div', { class: 'quota-heading' }, h('h1', { class: 'h1' }, tr('账号额度', 'Account usage')),
-      h('button', { type: 'button', class: 'btn', disabled: refreshingAll, onclick: async () => {
-        refreshingAll = true
-        viewUsage()
-        for (const account of S.accounts) await refreshQuota(account.id, Boolean(account.running))
-        refreshingAll = false
-        if (S.view === 'usage') viewUsage()
-      } }, tr('更新额度记录', 'Update usage records'))),
-    h('p', { class: 'help' }, tr('各账号只需在 Claude 中登录一次。更新时读取已打开账号的原生额度面板；未打开账号重读历史记录。首次读取需要给 CASE 辅助功能权限，额度由 Claude 自己获取。', 'Sign in once per account in Claude. Updates read the open account’s native quota panel and saved records for closed accounts. Allow CASE Accessibility access once; Claude handles its own usage requests.')),
-    S.accounts.map(account => usageCard(account, true))))
-}
 
 function storageCard (a) {
   const size = h('span', {}, '…')
@@ -736,7 +674,7 @@ function mergeStatus (next) {
   return next.map((a, idx) => {
     const old = by.get(a.id)
     return old
-      ? { running: old.running, sessions: old.sessions, exists: old.exists, usage: old.usage, ...a, idx }
+      ? mergeQuotaStatus(old, { ...a, idx }, quotaRequests.get(a.id))
       : { ...a, idx }
   })
 }
@@ -770,11 +708,16 @@ async function pullStatus () {
     S.accounts = S.accounts.map(a => {
       const s = by.get(a.id)
       if (!s) return a
-      if (a.running !== s.running || a.sessions !== s.sessions || a.exists !== s.exists || usageDisplayKey(a.usage) !== usageDisplayKey(s.usage)) changed = true
-      return { ...a, ...s }
+      const request = quotaRequests.get(a.id)
+      const next = mergeQuotaStatus(a, s, request)
+      if (request?.bridgeFailed && next.monitor?.lastAttemptAt >= request.startedAt) quotaRequests.delete(a.id)
+      if (a.running !== next.running || a.sessions !== next.sessions || a.exists !== next.exists || usageDisplayKey(a.usage) !== usageDisplayKey(next.usage) || a.monitor?.version !== next.monitor?.version) changed = true
+      return next
     })
     if (changed && S.view === 'list' && !S.panel) renderRows()
-    if (changed && (S.view === 'usage' || S.view === 'account')) paintQuota()
+    if (changed) renderBar()
+  } catch {
+    // A status transport error is not evidence that a quota query timed out.
   } finally {
     pulling = false
   }
@@ -783,6 +726,7 @@ async function pullStatus () {
 // ------------------------------------------------------------- keyboard ---
 
 document.addEventListener('keydown', e => {
+  if (e.defaultPrevented) return
   if (S.panel) return S.panel.keydown(e)
   if (modDown(e) && e.key === ',') { e.preventDefault(); return api.openSettings() }
   if (S.view !== 'list') {
@@ -803,6 +747,9 @@ document.addEventListener('keydown', e => {
   else if (a && modDown(e) && key === 'e') { e.preventDefault(); show('account', { id: a.id }) }
   else if (a && modDown(e) && key === 'g') { e.preventDefault(); show('account', { id: a.id, focus: 'chrome' }) }
   else if (a && modDown(e) && e.key === 'Backspace') { e.preventDefault(); show('remove', { id: a.id }) }
+  // Let a focused button handle Enter/Space itself. In particular, Enter on
+  // More or Refresh must not fall through to the selected account's switch.
+  else if (e.target.closest('button')) return
   else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault()
     if (list.length) { S.sel = (S.sel + (e.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length; paintSel() }
@@ -837,6 +784,6 @@ document.addEventListener('case-language-changed', () => {
   api.scanHealth().then(d => { setHealth(d); if (S.view === 'health') viewHealth() }).catch(() => {})
   // Keep running state honest while the window is in front.
   setInterval(() => {
-    if (!document.hidden && S.view === 'list' && !S.panel) pullStatus()
+    if (!document.hidden && ['list', 'account'].includes(S.view) && !S.panel) pullStatus()
   }, 2500)
 })()
