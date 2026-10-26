@@ -971,6 +971,21 @@ fn settings_set_language(app: AppHandle, language: String) -> Value {
     json!({ "ok": true, "language": language })
 }
 
+fn usage_failure_status(code: &str) -> &'static str {
+    match code {
+        "DESKTOP_IDENTITY_MISSING" | "IDENTITY_CHANGED" => "auth_failed",
+        "REFRESH_TIMEOUT" | "TIMEOUT" => "timeout",
+        // The global panel lock is held by another reader. This account did
+        // not start a read and must not remain marked as an active query.
+        "REFRESH_IN_PROGRESS"
+        | "ACCOUNT_NOT_OPEN"
+        | "PROFILE_PROCESS_AMBIGUOUS"
+        | "PANEL_UNAVAILABLE"
+        | "PANEL_UNRECOGNIZED" => "unavailable",
+        _ => "failed",
+    }
+}
+
 #[tauri::command(async)]
 fn usage_refresh(id: String, native: bool) -> Value {
     let Some(account) = find(&id) else {
@@ -999,17 +1014,7 @@ fn usage_refresh(id: String, native: bool) -> Value {
             json!({ "ok": true, "status": "success", "usage": value, "monitor": monitor })
         }
         Err(code) => {
-            let status = match code {
-                "DESKTOP_IDENTITY_MISSING" | "IDENTITY_CHANGED" => "auth_failed",
-                "REFRESH_IN_PROGRESS" => "in_progress",
-                "REFRESH_TIMEOUT" | "TIMEOUT" => "timeout",
-                "ACCOUNT_NOT_OPEN"
-                | "PROFILE_PROCESS_AMBIGUOUS"
-                | "PANEL_UNAVAILABLE"
-                | "PANEL_UNRECOGNIZED" => "unavailable",
-                "ACCESSIBILITY_REQUIRED" | "SAVE_FAILED" | "PLATFORM_UNSUPPORTED" => "failed",
-                _ => "failed",
-            };
+            let status = usage_failure_status(code);
             // A failed live read is never allowed to masquerade as a fresh
             // observation.  The UI must clear the displayed percentages and
             // show the explicit status; the persisted cache remains untouched
@@ -1685,6 +1690,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rejected_panel_read_is_not_an_in_progress_account_query() {
+        assert_eq!(usage_failure_status("REFRESH_IN_PROGRESS"), "unavailable");
+        assert_eq!(usage_failure_status("REFRESH_TIMEOUT"), "timeout");
+    }
 
     #[test]
     fn folder_names_keep_letters_and_collapse_the_rest() {

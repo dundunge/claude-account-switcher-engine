@@ -7,8 +7,10 @@
 The engine merges explicitly configured partitions. It carries portable session fields and
 historical hierarchy links, including parent/child links. It does not carry account permissions,
 MCP credentials or instructions to wake a parent session. No credential or transcript body is
-read or copied by the sync engine. Quota observation is separate: CASE reads Claude's own usage panel through
-macOS Accessibility. It reads no login credentials. See [NATIVE-USAGE.md](NATIVE-USAGE.md).
+read or copied by the sync engine. Quota queries are separate: each account can explicitly authorize an
+isolated official CLI, then run `/usage` on demand without switching Desktop. CASE also retains the
+macOS Accessibility panel fallback for an open account. It reads no login credentials.
+See [MANUAL-USAGE.md](MANUAL-USAGE.md) and [NATIVE-USAGE.md](NATIVE-USAGE.md).
 
 ## Runtime
 
@@ -47,4 +49,5 @@ Never rerun the initial migration tool over an existing installation.
 Synthetic tests verify merge, hierarchy, transactions, permissions and rollback without live accounts.
 They do not prove compatibility with every later Claude update or transfer a cloud account's privileges.
 Keep saved quota observations labeled with their original time. A UI observation does not prove a new server
-fetch, and an inactive profile only has its previous observation. Neither operation changes the account's quota.
+fetch. The panel fallback cannot refresh an inactive profile; an independently authorized account can instead
+use a manual official CLI query. Neither operation changes the account's quota.

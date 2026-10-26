@@ -309,7 +309,9 @@ def usage(text, now):
         raise ProbeError('CLI_WORKSPACE_TRUST_REQUIRED')
     if any(s in lower for s in ('choose the text style', 'select the text style', 'browser didn’t open')):
         raise ProbeError('CLI_SETUP_REQUIRED')
-    if 'loading' in lower or '加载' in text:
+    # A quota-specific loading notice invalidates old numbers on the screen.
+    # Background downloads/uploads/plugin reloads are unrelated to this panel.
+    if re.search(r'^\s*(?:loading\s+(?:usage(?:\s+data)?|quota)|(?:正在)?加载(?:额度|用量)(?:数据)?(?:中)?)[\s.…]*$', text, re.I | re.M):
         return None
     # Model-specific limits and context/insights percentages never substitute
     # for either subscription window. Read only the labelled block.
@@ -327,6 +329,8 @@ def usage(text, now):
         if any(x in line.lower() for x in ('extra usage', "what's contributing", 'usage insights')):
             active = None
         if active:
+            if re.fullmatch(r'\s*(?:loading|(?:正在)?加载中)[\s.…]*', line, re.I):
+                return None
             for number in re.findall(r'(?<![\d.])(\d+(?:\.\d+)?)\s*%\s*(?:used|已用)', line, re.I):
                 value = float(number)
                 if not math.isfinite(value) or not 0 <= value <= 100:

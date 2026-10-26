@@ -159,3 +159,46 @@ test('a failure without a backend snapshot remains empty when another window pol
   assert.equal(merged.usage, null)
   assert.equal(h.run('controller.state(accounts[0]).status'), 'failed')
 })
+
+test('a rejected panel-lock attempt clears its reading and remains retryable, not falsely querying', async () => {
+  const h = harness()
+  h.api.refreshUsage = async () => ({ ok: false, status: 'unavailable', code: 'REFRESH_IN_PROGRESS', usage: null, monitor: { configured: false, version: 2, status: 'unavailable', code: 'REFRESH_IN_PROGRESS', usage: null } })
+  const result = await h.run('controller.refresh("one")')
+  assert.equal(result.status, 'unavailable')
+  assert.equal(result.pending, false)
+  assert.equal(h.accounts[0].usage, null)
+  h.api.refreshUsage = async () => ({ ok: true, status: 'success', usage: { fh: 7, sd: 8 }, monitor: { configured: false, version: 3, status: 'success' } })
+  await h.run('controller.refresh("one")')
+  assert.equal(h.accounts[0].usage.fh, 7)
+})
+
+test('Refresh all waits for another window’s existing query before counting it or querying the next account', async () => {
+  const h = harness()
+  let release
+  h.api.refreshUsage = async id => {
+    h.calls.push(['query', id])
+    if (id === 'one') return { ok: false, status: 'in_progress', usage: null, monitor: { configured: true, version: 2, status: 'in_progress' } }
+    return { ok: true, status: 'success', usage: { fh: 10, sd: 20 }, monitor: { configured: true, version: 3, status: 'success' } }
+  }
+  h.api.status = () => new Promise(resolve => { release = resolve })
+  const running = h.run('controller.refreshAll()')
+  await tick()
+  assert.deepEqual(h.calls, [['query', 'one']])
+  release([{ id: 'one', usage: { fh: 12, sd: 34 }, monitor: { configured: true, version: 3, status: 'success' } }])
+  const result = await running
+  assert.equal(result.succeeded, 3)
+  assert.equal(result.unavailable, 0)
+  assert.equal(result.pending, 0)
+  assert.deepEqual(h.calls.filter(([command]) => command === 'query'), [['query', 'one'], ['query', 'two'], ['query', 'three']])
+})
+
+test('an unavailable local poll does not count another window’s running query as a failure', async () => {
+  const h = harness([account('one')])
+  h.api.refreshUsage = async () => ({ ok: false, status: 'in_progress', usage: null, monitor: { configured: true, version: 2, status: 'in_progress' } })
+  h.api.status = async () => { throw new Error('status connection unavailable') }
+  const result = await h.run('controller.refreshAll()')
+  assert.equal(result.succeeded, 0)
+  assert.equal(result.unavailable, 0)
+  assert.equal(result.pending, 1)
+  assert.match(h.calls.at(-1)[1], /1 个仍在查询/)
+})

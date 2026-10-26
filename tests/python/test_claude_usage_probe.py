@@ -113,6 +113,21 @@ class ParserTests(unittest.TestCase):
         for text in ('Context 0% used', PANEL + '\nLoading usage data…', 'Current week (Sonnet only)\n90% used'):
             self.assertIsNone(probe.usage(text, 123))
 
+    def test_background_activity_does_not_hide_a_complete_usage_panel(self):
+        for activity in ('Downloading update…', 'Uploading session…', 'Reloading plugins',
+                         'Loading plugins…', '正在加载插件', '加载历史会话'):
+            with self.subTest(activity=activity):
+                for text in (activity + '\n' + PANEL, PANEL + '\n' + activity):
+                    value = probe.usage(text, 123)
+                    self.assertEqual((value['fh'], value['sd']), (21, 67))
+
+    def test_loading_inside_a_quota_block_rejects_stale_numbers(self):
+        for loading in ('Loading…', 'Loading...', '加载中…', '正在加载中…'):
+            text = PANEL.replace('  ███░░ 21% used', '  ███░░ 21% used\n  ' + loading)
+            with self.subTest(loading=loading):
+                self.assertIsNone(probe.usage(text, 123))
+        self.assertIsNone(probe.usage(PANEL + '\n正在加载额度数据中…', 123))
+
     def test_errors_override_previously_rendered_percentages(self):
         for text, code in [('Failed to load usage data', 'CLI_USAGE_UNAVAILABLE'),
                            ('rate_limit_error', 'CLI_RATE_LIMITED'),

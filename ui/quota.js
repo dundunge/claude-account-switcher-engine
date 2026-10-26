@@ -28,7 +28,7 @@ function quotaError (code) {
     MONITOR_CONFIG_INVALID: tr('额度查询配置无法读取，请检查本地目录。', 'Usage query settings could not be read. Check the local directory.'),
     QUERY_NOT_RUN: tr('尚未查询。完成授权后点击查询。', 'Not queried yet. Complete authorization, then click Query.'),
     REFRESH_FAILED: tr('查询通信失败，本次额度未获取。请重试。', 'The query connection failed; current usage was not obtained. Try again.'),
-    REFRESH_IN_PROGRESS: tr('另一次面板读取正在进行，请稍候。', 'Another panel read is in progress. Please wait.'),
+    REFRESH_IN_PROGRESS: tr('另一次面板读取正在进行，本次额度未获取。请稍后手动重试。', 'Another panel read is in progress; this attempt did not obtain usage. Try again manually later.'),
     REFRESH_TIMEOUT: tr('额度查询超时，本次额度未获取。请稍后重试。', 'The usage query timed out; current usage was not obtained. Try again later.'),
     TIMEOUT: tr('额度查询超时，本次额度未获取。请稍后重试。', 'The usage query timed out; current usage was not obtained. Try again later.'),
     ACCOUNT_NOT_FOUND: tr('未找到该账号，本次额度未获取。请刷新账号列表后重试。', 'The account was not found; current usage was not obtained. Refresh the account list and try again.'),
@@ -154,21 +154,50 @@ function createQuotaController ({ getAccounts, onChange }) {
     paintQuota()
     let succeeded = 0
     let unavailable = 0
+    let pending = 0
     try {
       for (const id of ids) {
         if (!findAccount(id)) continue
-        const result = await refreshQuota(id)
+        let result = await refreshQuota(id)
+        // A different window may have started this query after our last
+        // status poll. Join its existing attempt without issuing another one.
+        if (result?.status === 'in_progress') result = await waitForQuota(id)
+        if (!findAccount(id)) continue
         if (result?.status === 'success') succeeded++
+        else if (result?.status === 'in_progress') pending++
         else unavailable++
       }
     } finally {
       refreshingAll = false
       paintQuota()
     }
-    toast(unavailable
+    toast(pending
+      ? tf('额度刷新：{0} 个成功，{1} 个未获取，{2} 个仍在查询。请查看账号状态。', 'Usage refresh: {0} succeeded, {1} unavailable, {2} still querying. Check account status.', succeeded, unavailable, pending)
+      : unavailable
       ? tf('额度刷新完成：{0} 个成功，{1} 个未获取。详情见设置 → 额度查询。', 'Usage refresh finished: {0} succeeded, {1} unavailable. See Settings › Usage queries.', succeeded, unavailable)
       : tf('已刷新 {0} 个账号的额度。', 'Refreshed usage for {0} accounts.', succeeded), unavailable ? 'error' : 'info')
-    return { succeeded, unavailable }
+    return { succeeded, unavailable, pending }
+  }
+
+  async function waitForQuota (id) {
+    const deadline = Date.now() + 60000
+    while (findAccount(id)) {
+      try {
+        const incoming = (await api.status()).find(account => account.id === id)
+        const account = findAccount(id)
+        if (!account) return
+        if (!incoming) return { status: 'unavailable' }
+        Object.assign(account, mergeQuotaStatus(account, incoming))
+        paintQuota(id)
+      } catch {
+        // A failed local status read does not terminate another window's
+        // query. Report it as still pending instead of inventing a failure.
+        return state(findAccount(id) || { id })
+      }
+      const current = state(findAccount(id) || { id })
+      if (current.status !== 'in_progress' || Date.now() >= deadline) return current
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
   }
 
   return {
