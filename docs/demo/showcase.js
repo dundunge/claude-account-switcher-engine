@@ -14,7 +14,11 @@ const views = {
     features: ['Separate login profiles', 'Manual usage queries', '5-hour & weekly limits, with reset times'] },
   portrait: { width: 1080, height: 1440, lang: 'zh-CN', theme: 'dark', page: 'index',
     eyebrow: 'CLAUDE 桌面端多账号工具', headline: '继续用桌面端，\n多个账号也从容。',
-    lede: '本地切号  /  手动查额度  /  不使用反代', features: [] }
+    lede: '本地切号  /  手动查额度  /  不使用反代', features: [] },
+  x: { width: 2000, height: 800, lang: 'zh-CN', theme: 'dark', page: 'index',
+    eyebrow: 'CLAUDE DESKTOP 多账号管理 · macOS', headline: '继续用桌面端，\n多个账号也从容。',
+    lede: '本地切号 · 会话同步 · 手动查额度\n5 小时 / 周额度，用量与重置时间一眼看清。',
+    features: ['独立登录目录', '仅适配 Claude Pro', '不使用反代'] }
 }
 const params = new URLSearchParams(location.search)
 const name = Object.hasOwn(views, params.get('view')) ? params.get('view') : 'overview'

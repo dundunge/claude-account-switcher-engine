@@ -48,4 +48,14 @@ footer { position: absolute; left: 88px; right: 88px; bottom: 42px; border-top: 
 [data-view='portrait'] footer { left: 70px; right: 70px; bottom: 23px; padding-top: 11px; font-size: 10px; }
 [data-view='portrait'] .repo { display: none; }
 [data-view='portrait'] .canvas::before { top: 250px; left: 300px; }
+[data-view='x'] .brand { left: 88px; top: 48px; }
+[data-view='x'] .copy { top: 168px; left: 88px; width: 1100px; }
+[data-view='x'] .eyebrow { font-size: 16px; margin-bottom: 20px; }
+[data-view='x'] h1 { font-size: 90px; line-height: 1.13; letter-spacing: -.055em; }
+[data-view='x'] .lede { font-size: 25px; line-height: 1.65; margin-top: 24px; }
+[data-view='x'] .features { flex-direction: row; gap: 16px; margin-top: 30px; font-size: 18px; }
+[data-view='x'] .features span { padding: 10px 16px; border: 1px solid #d9c8b6; border-radius: 30px; background: #fff8f080; }
+[data-view='x'] .window { top: 52px; left: 1370px; transform: scale(1.08); }
+[data-view='x'] footer { bottom: 28px; padding-top: 14px; font-size: 13px; }
+[data-view='x'] .canvas::before { left: 1150px; top: -220px; }
 @media print { .demo-nav { display: none; } }

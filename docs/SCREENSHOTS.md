@@ -18,8 +18,10 @@ not real-account verification. Current adaptation and verification cover Claude 
 | [额度管理](media/case-usage-zh.jpg) | 1200 × 1280 | 展示独立授权、查询及各账号详细读数 |
 | [English cover](media/case-overview-en.jpg) | 1600 × 900 | English README、英文介绍 |
 | [竖版宣传图](media/case-social-portrait-zh.jpg) | 1080 × 1440 | 社交平台 3:4 配图 |
+| [X 帖子横图](media/case-social-x-5x2-zh.jpg) | 2000 × 800 | X 帖子 5:2 横版配图 |
 
-建议发帖使用中文封面，搭配账号主页和额度管理两张细节图；需要竖图时使用 3:4 版本。
+建议发帖使用中文封面，搭配账号主页和额度管理两张细节图；需要竖图时使用 3:4 版本，
+X 帖子可使用 5:2 横图。
 配文请保留模拟数据说明，以及仅适配 Claude Pro 的范围。
 
 ## 中文封面
@@ -41,6 +43,10 @@ not real-account verification. Current adaptation and verification cover Claude 
 ## 竖版宣传图
 
 ![3:4 竖版宣传图，模拟数据](media/case-social-portrait-zh.jpg)
+
+## X 帖子横图
+
+![X 帖子 5:2 横图，模拟数据，仅适配 Claude Pro](media/case-social-x-5x2-zh.jpg)
 
 ## 本地复现
 

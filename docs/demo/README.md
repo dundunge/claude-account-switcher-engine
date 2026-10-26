@@ -29,6 +29,7 @@ python3 tools/preview_server.py --port 0
 | `/?view=usage` | 中文额度管理 |
 | `/?view=english` | English 浅色 16:9 封面 |
 | `/?view=portrait` | 中文 3:4 宣传图 |
+| `/?view=x` | 中文 5:2 的 X 帖子横图（2000 × 800） |
 | `/app/index.html?lang=zh-CN&theme=dark` | 可操作的模拟主页 |
 | `/app/settings.html?lang=zh-CN&theme=dark&section=usage` | 可操作的模拟额度设置 |
 
