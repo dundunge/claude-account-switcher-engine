@@ -103,6 +103,7 @@ Local state polling and time-label repainting do not request quota.
 
 Offline tests, installed-app checks and independent audits have separate scopes:
 
+- **Cross-Platform Offline Verification (4.3.0)**: Formatting, Clippy, Rust, Node and applicable Python tests passed on macOS, Windows Server 2022 and Ubuntu 22.04; see the [GitHub Actions record](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40446264865). Windows ConPTY, named pipes and authorization IPC use synthetic programs. Windows/Linux have not been tested with real accounts, installer interaction or Desktop switching.
 - **Scheduled Refresh Offline Verification (2026-10-26)**: **237 tests passed** (Python 120, Rust unit 76 + bridge 3, Node 38), plus Clippy. New tests use mocks. The browser demo checks interface behavior without a real scheduling worker. This version has been installed locally and its Settings entry checked; real-account queries at scheduled deadlines have not been verified.
 - **Grok Audit and Fix Tracking (2026-10-25)**: Grok checked 77 file hashes and reran 15 Node tests against the preceding audit package, without rerunning the complete suite or verifying real accounts. The implementer fixed the panel-lock status, background-activity parsing and multi-window batch-count issues. **Independent re-review is pending**; see the [audit follow-up](docs/AUDIT-FOLLOWUP-20261025.md).
 - **Preceding Installed-App Acceptance (`103dd9f`, 2026-10-25)**: That batch passed 214 checks. Manual queries succeeded for three independently authorized Pro accounts, showing both used percentages and reset times; row selection, single/bulk refresh and independent CLI entry points were checked. No real Desktop switch was executed. This does not establish real-account acceptance for later audit fixes or scheduled refresh.
@@ -158,7 +159,7 @@ node --test tests/*.test.cjs
 
 Sync scripts and automated test suites are included in the repository:
 
-- `engine/claude_session_sync.py`: Version 0.3.0 index merger, snapshot creator, and rollback engine.
+- `engine/claude_session_sync.py`: Version 0.4.0 index merger, snapshot creator, and rollback engine. Existing external 0.3.0 sync environments are not upgraded by replacing the application; see [platform notes](docs/CROSS-PLATFORM.md).
 - `tools/case_sync_bridge.py`: Manages profile health checks and safely orchestrates sequential transitions.
 - `tools/migrate_cockpit_to_case.py`: **Initial migration for an existing Cockpit sync configuration**, requiring a reviewed `ClaudeSessionSync/config.json`. Previews by default; `--apply` writes changes and refuses to overwrite an existing CASE installation or account directory. Previously migrated users **must not rerun it**.
 

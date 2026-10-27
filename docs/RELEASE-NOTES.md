@@ -1,4 +1,4 @@
-# CASE 4.3.0
+# CASE 4.3.1
 
 **主要在 macOS 开发和使用；Windows、Linux 包未经真实账号、安装交互和桌面切号实测，属于实验支持。**
 自动化构建与模拟测试不等于真实使用验收。仅使用 Claude Pro 验证过，没有 Max 订阅用于测试。
@@ -7,10 +7,10 @@
 
 | 系统 | 文件 |
 | --- | --- |
-| macOS Apple Silicon / Intel | `CASE-4.3.0-mac-universal.zip` |
-| Windows x64 | `CASE-4.3.0-win-x64-setup.exe`，或便携 `CASE-4.3.0-win-x64.zip` |
-| Linux x64 | `CASE-4.3.0-linux-x64.deb`，或 `CASE-4.3.0-linux-x64.AppImage` |
-| 同步引擎、授权组件准备工具和说明 | `CASE-4.3.0-local-sync-source.tar.gz` |
+| macOS Apple Silicon / Intel | `CASE-4.3.1-mac-universal.zip` |
+| Windows x64 | `CASE-4.3.1-win-x64-setup.exe`，或便携 `CASE-4.3.1-win-x64.zip` |
+| Linux x64 | `CASE-4.3.1-linux-x64.deb`，或 `CASE-4.3.1-linux-x64.AppImage` |
+| 同步引擎、授权组件准备工具和说明 | `CASE-4.3.1-local-sync-source.tar.gz` |
 
 每个文件均提供同名 `.sha256` 校验文件。macOS 为本地临时签名，未公证；Windows 未进行发行者签名。
 首次打开请按系统正常安全提示处理。Linux 针对官方 Ubuntu / Debian Claude Desktop Beta，
@@ -18,6 +18,7 @@ Windows 需官方独立安装版，Microsoft Store / MSIX 的独立 profile 尚�
 
 ## 本次内容
 
+- 修正 macOS 发布脚本的 `lipo` 参数顺序；4.3.0 的安装包未发布，4.3.1 是本次跨平台成品发布版本。
 - 多账号独立 `--user-data-dir`，主页固定“切换”与单号刷新，顶部串行刷新全部账号。
 - 官方 Claude Code `/usage` 独立账号查询，关闭的 Desktop 账号也能查；
   账号 / org 绑定、独立 Electron 授权窗口与直接打开已授权账号 CLI。
@@ -51,6 +52,8 @@ Desktop 切号与额度查询分开：查询不会为了读取额度而退出或
 详见仓库 README、跨平台说明、同步与额度查询文档。
 
 ## English
+
+Version 4.3.1 fixes the macOS packaging command. Version 4.3.0 binaries were not published.
 
 Developed primarily on macOS. **Windows and Linux packages are experimental and have not been
 tested with real accounts, interactive installation or desktop account switching.** Automated

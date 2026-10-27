@@ -12,7 +12,7 @@ python3 tools/compatibility_manifest.py \
 
 | 组件 | 当前版本 | 兼容边界 |
 | --- | --- | --- |
-| CASE App | `4.3.0`（Cargo package） | macOS 开发与使用；Windows / Linux 实验适配及打包，未经真实桌面/账号实测 |
+| CASE App | `4.3.1`（Cargo package） | macOS 开发与使用；Windows / Linux 实验适配及打包，未经真实桌面/账号实测 |
 | Session sync engine | `0.4.0` | bridge 通过 `engine_sha256` 固定源码；不读凭据或正文；保留旧 schema |
 | CASE bridge | `0.4.0` | hook `schema_version: 1`；新安装写入 `bridge_sha256`；可读取既有 0.3.0 engine |
 | Runtime config | `schema_version: 2` | 多 profile / account / organization 分区 |

@@ -102,6 +102,7 @@ CASE 从架构设计上就明确排除了反向代理、API 网关中转或请�
 
 离线测试、安装版检查和独立审计分别记录：
 
+- **跨平台离线验证（4.3.0）**：macOS、Windows Server 2022、Ubuntu 22.04 的格式检查、Clippy、Rust、Node 和适用的 Python 测试均通过，见 [GitHub Actions 记录](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40446264865)。Windows 的 ConPTY、命名管道与授权 IPC 使用模拟程序验证；Windows/Linux 尚未完成真实账号、安装交互和 Desktop 切号实测。
 - **定时刷新版本离线验证（2026-10-26）**：**237 项测试通过**（Python 120、Rust 单元 76 + bridge 3、Node 38），Clippy 通过。新增测试使用模拟环境；模拟网页版验证界面操作，不运行真实定时 worker。该版本已在本机替换应用并检查设置入口，尚未完成真实账号的定时到期查询验收。
 - **Grok 审计与修复跟踪（2026-10-25）**：Grok 对此前审计包核对 77 项文件哈希，重跑 15 项 Node 测试；没有重跑全部测试或验证真实账号。实现者已修复面板锁状态、后台活动解析和跨窗口批量统计三项问题，**修复仍待独立复核**，见[审计跟进记录](docs/AUDIT-FOLLOWUP-20261025.md)。
 - **此前安装版验收（`103dd9f`，2026-10-25）**：该批次完成 214 项验证；三个独立授权 Pro 账号的手动查询成功，显示两档使用量和重置时间，核对了账号行选择、单号／全部刷新及独立 CLI 入口。没有执行真实 Desktop 切号，也不代表后续审计修复或定时刷新已经完成真实账号验收。
@@ -157,7 +158,7 @@ node --test tests/*.test.cjs
 
 相关脚本与离线自动化测试均已开源在仓库中：
 
-- `engine/claude_session_sync.py`：0.3.0 版本的核心索引同步、快照备份与事故恢复引擎。
+- `engine/claude_session_sync.py`：0.4.0 版本的核心索引同步、快照备份与事故恢复引擎。已有外部 0.3.0 同步环境不会随应用替换自动升级，升级边界见[跨平台说明](docs/CROSS-PLATFORM.md)。
 - `tools/case_sync_bridge.py`：负责与 CASE 交互、检查 Profile 分区健康度并安全执行串行切换。
 - `tools/migrate_cockpit_to_case.py`：**已有 Cockpit 同步配置的首次迁移工具**，需要先准备经过审核的 `ClaudeSessionSync/config.json`。默认仅预览；`--apply` 才会写入，拒绝覆盖已有 CASE 或账号目录。已迁移用户**不要重复运行**。
 

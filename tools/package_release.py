@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Package only known build outputs, never developer account data or out/."""
 import hashlib
+import os
 from pathlib import Path
 import plistlib
 import shutil
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tomllib
+import traceback
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +29,7 @@ def package(platform):
         info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
         if info['CFBundleIdentifier'] != 'local.launcher.case' or info['CFBundleShortVersionString'] != VERSION:
             raise RuntimeError('Bundle identity/version mismatch')
-        subprocess.run(['lipo', '-verify_arch', 'arm64', 'x86_64', str(app / 'Contents/MacOS/CASE')], check=True)
+        subprocess.run(['lipo', str(app / 'Contents/MacOS/CASE'), '-verify_arch', 'arm64', 'x86_64'], check=True)
         subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(DIST / (PREFIX + '-mac-universal.zip'))], check=True)
         with tarfile.open(DIST / (PREFIX + '-local-sync-source.tar.gz'), 'w:gz') as archive:
             for name in ['engine', 'tools', 'docs', 'README.md', 'README.en.md', 'NOTICE.md', 'LICENSE']:
@@ -66,4 +68,10 @@ def verify():
 
 
 if __name__ == '__main__':
-    verify() if sys.argv[1] == 'verify' else package(sys.argv[1])
+    try:
+        verify() if sys.argv[1] == 'verify' else package(sys.argv[1])
+    except Exception:
+        if os.environ.get('GITHUB_ACTIONS'):
+            detail = traceback.format_exc()[-3000:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+            print('::error title=Release packaging failed::' + detail, flush=True)
+        raise
