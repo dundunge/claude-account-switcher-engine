@@ -2,6 +2,7 @@
 """Package only known build outputs, never developer account data or out/."""
 import hashlib
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,10 @@ def package(platform):
     DIST.mkdir(exist_ok=True)
     if platform == 'mac':
         app = ROOT / 'target/universal-apple-darwin/release/bundle/macos/CASE.app'
+        info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+        if info['CFBundleIdentifier'] != 'local.launcher.case' or info['CFBundleShortVersionString'] != VERSION:
+            raise RuntimeError('Bundle identity/version mismatch')
+        subprocess.run(['lipo', '-verify_arch', 'arm64', 'x86_64', str(app / 'Contents/MacOS/CASE')], check=True)
         subprocess.run(['ditto', '-c', '-k', '--sequesterRsrc', '--keepParent', str(app), str(DIST / (PREFIX + '-mac-universal.zip'))], check=True)
         with tarfile.open(DIST / (PREFIX + '-local-sync-source.tar.gz'), 'w:gz') as archive:
             for name in ['engine', 'tools', 'docs', 'README.md', 'README.en.md', 'NOTICE.md', 'LICENSE']:

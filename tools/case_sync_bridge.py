@@ -228,13 +228,18 @@ def switch_lock(engine, state):
     engine.mkdir_private(state)
     path = state / 'case-switch.lock'
     engine.safe_chain(path)
-    fd = engine.safe_open(path, os.O_CREAT | os.O_RDWR)
+    # Existing macOS 0.3.0 engines do not expose the new portable helpers.
+    fd = engine.safe_open(path, os.O_CREAT | os.O_RDWR) if hasattr(engine, 'safe_open') else os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise BridgeError("INVALID_SWITCH_LOCK")
         try:
-            engine.lock_fd(fd)
+            if hasattr(engine, 'lock_fd'):
+                engine.lock_fd(fd)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, PermissionError):
             raise BridgeError("SWITCH_ALREADY_RUNNING") from None
         yield

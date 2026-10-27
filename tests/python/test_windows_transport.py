@@ -60,7 +60,7 @@ time.sleep(20)
         url = 'https://claude.com/cai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A12345%2Fcallback&state=synthetic'
         with tempfile.TemporaryDirectory() as root:
             for name in ['first', 'second', 'third']:
-                base = Path(root) / name
+                base = Path(root).resolve() / name
                 (base / 'cli').mkdir(parents=True)
                 (base / 'workspace').mkdir()
                 script = base / 'auth-browser.cjs'

@@ -724,11 +724,16 @@ def atomic_write(path, f, creating=False):
                 api = ctypes.WinDLL('advapi32', use_last_error=True)
                 api.GetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID, w.DWORD, ctypes.POINTER(w.DWORD)]
                 api.SetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID]
+                api.GetSecurityDescriptorControl.argtypes = [w.LPVOID, ctypes.POINTER(w.WORD), ctypes.POINTER(w.DWORD)]
                 needed = w.DWORD()
                 api.GetFileSecurityW(str(path), 4, None, 0, ctypes.byref(needed))
                 if not needed.value: raise SyncError('FILE_PERMISSIONS_UNAVAILABLE')
                 descriptor = ctypes.create_string_buffer(needed.value)
-                if not api.GetFileSecurityW(str(path), 4, descriptor, len(descriptor), ctypes.byref(needed)) or not api.SetFileSecurityW(temp, 4, descriptor):
+                control, revision = w.WORD(), w.DWORD()
+                if not api.GetFileSecurityW(str(path), 4, descriptor, len(descriptor), ctypes.byref(needed)) or not api.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+                    raise SyncError('FILE_PERMISSIONS_UNAVAILABLE')
+                flags = 4 | (0x80000000 if control.value & 0x1000 else 0x20000000)
+                if not api.SetFileSecurityW(temp, flags, descriptor):
                     raise SyncError('FILE_PERMISSIONS_UNAVAILABLE')
             os.replace(temp, str(path))
         fsync_dir(path.parent)

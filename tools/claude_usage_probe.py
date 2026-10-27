@@ -42,6 +42,9 @@ def environment(config, workspace):
     if os.name == 'nt':
         allowed.update({'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'ComSpec',
                         'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'PATHEXT'})
+    elif sys.platform == 'linux':
+        allowed.update({'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR',
+                        'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY'})
     env = {k: v for k, v in os.environ.items() if k in allowed}
     # The broad nonessential-traffic switch also blocks /api/oauth/usage in
     # current official CLI versions. Disable telemetry/reporting individually.
@@ -505,15 +508,16 @@ class WindowsDiagnostic:
 
 def capture_windows(binary, config, workspace, deadline):
     try:
-        from winpty import PtyProcess
+        from winpty import PtyProcess, Backend
     except ImportError:
         raise ProbeError('CONPTY_NOT_INSTALLED') from None
     diagnostic, proc = WindowsDiagnostic(), None
     try:
         evidence, screen, chunks = UsageEvidence(), Screen(), queue.Queue()
         cache_at = cached_observation_at(config, int(time.time() * 1000))
-        proc = PtyProcess.spawn(subprocess.list2cmdline(cli_arguments(binary) + ['--debug-file', diagnostic.path, '/usage']),
-                               cwd=str(workspace), env=environment(config, workspace), dimensions=(200, 160))
+        proc = PtyProcess.spawn(cli_arguments(binary) + ['--debug-file', diagnostic.path, '/usage'],
+                               cwd=str(workspace), env=environment(config, workspace), dimensions=(200, 160),
+                               backend=str(Backend.ConPTY))  # pywinpty treats integer zero as unset.
         def reader():
             while True:
                 try: value = proc.read(65536)
