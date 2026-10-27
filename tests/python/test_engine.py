@@ -69,7 +69,7 @@ class EngineTests(unittest.TestCase):
 
     def tree(self, root=None):
         root = root or self.index
-        return {str(p.relative_to(root)): (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode) for p in root.rglob("*") if p.is_file()}
+        return {p.relative_to(root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns, p.stat().st_mode) for p in root.rglob("*") if p.is_file()}
 
     def run_sync(self):
         return s.apply(self.c, s.build_plan(self.c), guard=lambda: None)
