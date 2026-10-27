@@ -113,7 +113,7 @@ pub fn file_contains(file: &Path, needle: &[u8]) -> bool {
 
 /// Quote a string for /bin/sh. Single quotes are the only ones sh does nothing
 /// inside, so the single quote itself is the one character needing care.
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }

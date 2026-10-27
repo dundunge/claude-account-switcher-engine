@@ -765,8 +765,7 @@ mod tests {
             std::fs::create_dir_all(places.projects.join("proj")).unwrap();
             std::fs::write(
                 places.projects.join(format!("proj/{CLI_ID}.jsonl")),
-                "{\"type\":\"user\",\"cwd\":\"/tmp/work\",\"timestamp\":\"2026-08-12T10:00:00Z\"}\n\
-                 {\"type\":\"assistant\",\"timestamp\":\"2026-08-12T10:05:00Z\"}\n",
+                format!("{}\n{}\n", serde_json::json!({"type": "user", "cwd": root.join("work"), "timestamp": "2026-08-12T10:00:00Z"}), serde_json::json!({"type": "assistant", "timestamp": "2026-08-12T10:05:00Z"})),
             )
             .unwrap();
             // A second account, added but never opened: no log of its own, and no index.

@@ -23,6 +23,6 @@ for command in checks:
     print(text, flush=True)
     if result.returncode:
         if os.environ.get('GITHUB_ACTIONS'):
-            detail = '\n'.join(text.splitlines()[-100:]).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+            detail = text[-3500:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
             print('::error title=Offline verification failed::' + detail, flush=True)
         sys.exit(result.returncode)
