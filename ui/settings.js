@@ -7,7 +7,7 @@ const sections = () => [
   { id: 'general', label: tr("通用", "General"), icon: 'sliders', lede: tr("设置启动方式和账号列表顺序。", "How CASE starts, and how your accounts are listed.") },
   { id: 'usage', label: tr('额度查询', 'Usage queries'), icon: 'refresh', lede: tr('主页可手动刷新全部账号。这里可设置定时刷新、逐账号查询、管理授权和打开独立 CLI。', 'Manually refresh all accounts from home. Set scheduled refresh, query individual accounts, manage authorization and open account CLIs here.') },
   { id: 'shortcut', label: tr("快捷键", "Shortcut"), icon: 'keyboard', lede: tr("在任意应用中调出账号列表。", "Summon the launcher from any app.") },
-  { id: 'presence', label: IS_WIN ? tr("通知区域", "Notification area") : tr("菜单栏与程序坞", "Menu bar & Dock"), icon: 'window', lede: tr("选择 CASE 的显示位置，始终保留一个可打开的入口。", "Choose where CASE lives. One place always stays, so there is a way back in.") },
+  { id: 'presence', label: IS_MAC ? tr("菜单栏与程序坞", "Menu bar & Dock") : tr("通知区域", "Notification area"), icon: 'window', lede: tr("选择 CASE 的显示位置，始终保留一个可打开的入口。", "Choose where CASE lives. One place always stays, so there is a way back in.") },
   { id: 'updates', label: tr("更新", "Updates"), icon: 'download', lede: tr("更新仅检查 dundunge/claude-account-switcher-engine。", "Updates are checked only in dundunge/claude-account-switcher-engine.") },
   { id: 'data', label: tr("会话与数据", "Sessions & data"), icon: 'shield', lede: tr("查看会话索引、备份和 CASE 数据位置。", "The safety net for Claude’s session list, and where CASE keeps its files.") },
   { id: 'about', label: tr("关于", "About"), icon: 'info', lede: '' }
@@ -203,7 +203,7 @@ const VIEWS = {
   presence () {
     const s = T.settings
     const value = !s.menuBar ? 'dock' : s.hideDock ? 'bar' : 'both'
-    const choices = IS_WIN
+    const choices = !IS_MAC
       ? [
           ['both', tr("通知区域和任务栏", "Notification area and taskbar"), tr("通过通知区域选账号，或从任务栏打开窗口。", "Pick an account from the notification area, or open the window from the taskbar.")],
           ['bar', tr("仅通知区域", "Notification area only"), tr("运行时隐藏任务栏图标，通过通知区域打开。", "No taskbar button while it runs. The notification area is the way in.")],
@@ -221,7 +221,7 @@ const VIEWS = {
       s.hideDock = res.hideDock
       render()
     }
-    const pinTitle = IS_WIN ? tr("开始菜单快捷方式", "Start menu shortcut") : tr("将 CASE 保留在程序坞", "Keep CASE in the Dock")
+    const pinTitle = IS_WIN ? tr("开始菜单快捷方式", "Start menu shortcut") : IS_MAC ? tr("将 CASE 保留在程序坞", "Keep CASE in the Dock") : tr("应用菜单快捷方式", "Application menu shortcut")
     const pin = h('div', { class: 'card' }, settingRow(pinTitle, tr("正在检查…", "Checking…")))
     api.shortcutStatus().then(st => {
       const create = h('button', {

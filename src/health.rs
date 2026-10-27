@@ -802,13 +802,14 @@ mod tests {
 
     #[test]
     fn a_session_in_the_log_but_not_in_the_index_is_an_orphan() {
-        let main = Fixture::new().find("default");
+        let f = Fixture::new();
+        let main = f.find("default");
         assert_eq!(main.orphans.len(), 1);
         assert_eq!(main.orphans[0].cli_session_id, CLI_ID);
         assert_eq!(main.orphans[0].local_id, "local_abc");
         assert_eq!(
             main.orphans[0].cwd.as_deref(),
-            Some("/tmp/work"),
+            f.root.join("work").to_str(),
             "read back out of the transcript"
         );
         assert_eq!(

@@ -411,21 +411,21 @@ function accelCaps (accel) {
   const parts = accel.split('+')
   const key = parts.pop()
   const shown = key.length === 1 ? key.toUpperCase() : key
-  if (IS_WIN) {
-    return [...['Control', 'Alt', 'Shift', 'Super'].filter(m => parts.includes(m)).map(m => KEY_WORD[m]), shown]
+  if (!IS_MAC) {
+    return [...['Control', 'Alt', 'Shift', 'Super'].filter(m => parts.includes(m)).map(m => m === 'Super' && !IS_WIN ? 'Super' : KEY_WORD[m]), shown]
   }
   return [...['Control', 'Alt', 'Shift', 'Command'].filter(m => parts.includes(m)).map(m => KEY_SYMBOL[m]), shown]
 }
 
-const prettyAccel = accel => (IS_WIN ? accelCaps(accel).join('+') : accelCaps(accel).join(''))
+const prettyAccel = accel => (IS_MAC ? accelCaps(accel).join('') : accelCaps(accel).join('+'))
 
 /** The modifiers held down in a keyboard event, as caps. */
 function heldCaps (e) {
   const held = []
-  if (e.ctrlKey) held.push(IS_WIN ? 'Ctrl' : '⌃')
-  if (e.altKey) held.push(IS_WIN ? 'Alt' : '⌥')
-  if (e.shiftKey) held.push(IS_WIN ? 'Shift' : '⇧')
-  if (e.metaKey) held.push(IS_WIN ? 'Win' : '⌘')
+  if (e.ctrlKey) held.push(IS_MAC ? '⌃' : 'Ctrl')
+  if (e.altKey) held.push(IS_MAC ? '⌥' : 'Alt')
+  if (e.shiftKey) held.push(IS_MAC ? '⇧' : 'Shift')
+  if (e.metaKey) held.push(IS_MAC ? '⌘' : IS_WIN ? 'Win' : 'Super')
   return held
 }
 
@@ -439,7 +439,7 @@ function accelFromEvent (e) {
   if (e.ctrlKey) mods.push('Control')
   if (e.altKey) mods.push('Alt')
   if (e.shiftKey) mods.push('Shift')
-  if (e.metaKey) mods.push(IS_WIN ? 'Super' : 'Command')
+  if (e.metaKey) mods.push(IS_MAC ? 'Command' : 'Super')
   if (['Meta', 'Alt', 'Shift', 'Control'].includes(e.key)) return null
 
   const code = e.code || ''

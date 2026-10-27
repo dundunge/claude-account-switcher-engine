@@ -489,7 +489,8 @@ class WindowsDiagnostic:
         c, w, kernel = self.c, self.w, self.kernel
         if not self.connected:
             self.connected = bool(kernel.ConnectNamedPipe(self.handle, None)) or c.get_last_error() == 535
-            if not self.connected: return b''
+            # A short-lived writer can close before ConnectNamedPipe is polled.
+            # Read its queued bytes even while the pipe is in closing state.
         data, count = c.create_string_buffer(65536), w.DWORD()
         if not kernel.ReadFile(self.handle, data, len(data), c.byref(count), None):
             if c.get_last_error() in (109, 233):

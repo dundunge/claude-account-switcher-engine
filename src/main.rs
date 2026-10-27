@@ -1324,7 +1324,11 @@ fn register_hotkey(app: &AppHandle, accel: Option<&str>) -> Result<(), String> {
 /// would refuse it and report the shortcut as taken by another app, which is both
 /// wrong and unfixable from the settings sheet.
 fn usable_hotkey(accel: &str) -> &str {
-    let foreign = if cfg!(windows) { "Command" } else { "Super" };
+    let foreign = if cfg!(target_os = "macos") {
+        "Super"
+    } else {
+        "Command"
+    };
     if accel.split('+').any(|k| k == foreign) {
         platform::DEFAULT_HOTKEY
     } else {
@@ -1747,10 +1751,10 @@ mod tests {
 
     #[test]
     fn a_hotkey_from_the_other_platform_falls_back_to_this_ones_default() {
-        let foreign = if cfg!(windows) {
-            "Alt+Command+C"
-        } else {
+        let foreign = if cfg!(target_os = "macos") {
             "Super+Alt+C"
+        } else {
+            "Alt+Command+C"
         };
         assert_eq!(usable_hotkey(foreign), platform::DEFAULT_HOTKEY);
         assert_eq!(usable_hotkey("Alt+Shift+K"), "Alt+Shift+K");
