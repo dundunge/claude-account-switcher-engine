@@ -49,7 +49,7 @@ impl Places {
         let default_profile = crate::platform::app_data().join("Claude");
         // On Windows Electron's default log directory is <userData>/logs, so for
         // the default profile the shared log sits inside the profile itself.
-        let shared_log = if cfg!(windows) {
+        let shared_log = if !cfg!(target_os = "macos") {
             default_profile.join("logs").join("main.log")
         } else {
             home.join("Library/Logs/Claude/main.log")

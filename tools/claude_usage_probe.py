@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import queue
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -38,6 +39,9 @@ def environment(config, workspace):
     allowed = {'HOME', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'TZ', 'HTTP_PROXY',
                'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY', 'http_proxy',
                'https_proxy', 'all_proxy', 'no_proxy'}
+    if os.name == 'nt':
+        allowed.update({'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'ComSpec',
+                        'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'PATHEXT'})
     env = {k: v for k, v in os.environ.items() if k in allowed}
     # The broad nonessential-traffic switch also blocks /api/oauth/usage in
     # current official CLI versions. Disable telemetry/reporting individually.
@@ -208,6 +212,12 @@ def local_timezone():
             return ZoneInfo(name)
         except (ValueError, ZoneInfoNotFoundError):
             pass
+    if os.name == 'nt':
+        try:
+            from tzlocal import get_localzone
+            return get_localzone()
+        except ImportError:
+            raise ZoneInfoNotFoundError('Local timezone unavailable') from None
     # A fixed "current UTC offset" would be wrong for a weekly reset that
     # crosses daylight saving time. Read the system's transition table.
     with open('/etc/localtime', 'rb') as file:
@@ -401,7 +411,155 @@ def cached_observation_at(config, now):
     return None
 
 
+_job_handle = None
+
+
+def windows_job():
+    """Contain only this newly started helper and its own descendants."""
+    import ctypes as c
+    from ctypes import wintypes as w
+    class Basic(c.Structure):
+        _fields_ = [('process_time', c.c_longlong), ('job_time', c.c_longlong),
+                    ('flags', w.DWORD), ('minimum', c.c_size_t), ('maximum', c.c_size_t),
+                    ('active', w.DWORD), ('affinity', c.c_size_t), ('priority', w.DWORD), ('scheduling', w.DWORD)]
+    class IO(c.Structure):
+        _fields_ = [(k, c.c_ulonglong) for k in ('read', 'write', 'other', 'read_bytes', 'write_bytes', 'other_bytes')]
+    class Extended(c.Structure):
+        _fields_ = [('basic', Basic), ('io', IO), ('process_memory', c.c_size_t),
+                    ('job_memory', c.c_size_t), ('peak_process', c.c_size_t), ('peak_job', c.c_size_t)]
+    kernel = c.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [w.LPVOID, w.LPCWSTR]
+    kernel.CreateJobObjectW.restype = w.HANDLE
+    kernel.SetInformationJobObject.argtypes = [w.HANDLE, c.c_int, w.LPVOID, w.DWORD]
+    kernel.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    handle = kernel.CreateJobObjectW(None, None)
+    info = Extended()
+    info.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not handle or not kernel.SetInformationJobObject(handle, 9, c.byref(info), c.sizeof(info)) or not kernel.AssignProcessToJobObject(handle, kernel.GetCurrentProcess()):
+        if handle: kernel.CloseHandle(handle)
+        raise ProbeError('CLI_PROCESS_ISOLATION_FAILED')
+    global _job_handle
+    _job_handle = handle  # Intentionally remains open until helper process exit.
+
+
+class WindowsDiagnostic:
+    """A random, user-only named pipe. Raw debug output never reaches disk."""
+    def __init__(self):
+        import ctypes as c
+        from ctypes import wintypes as w
+        self.c, self.w = c, w
+        kernel, security = c.WinDLL('kernel32', use_last_error=True), c.WinDLL('advapi32', use_last_error=True)
+        kernel.GetCurrentProcess.restype = w.HANDLE
+        kernel.CloseHandle.argtypes = [w.HANDLE]
+        kernel.LocalFree.argtypes = [w.HLOCAL]
+        security.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)]
+        security.GetTokenInformation.argtypes = [w.HANDLE, c.c_int, w.LPVOID, w.DWORD, c.POINTER(w.DWORD)]
+        security.ConvertSidToStringSidW.argtypes = [w.LPVOID, c.POINTER(w.LPWSTR)]
+        security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [w.LPCWSTR, w.DWORD, c.POINTER(w.LPVOID), c.POINTER(w.DWORD)]
+        class SA(c.Structure):
+            _fields_ = [('length', w.DWORD), ('descriptor', w.LPVOID), ('inherit', w.BOOL)]
+        token, needed, sid_text, descriptor = w.HANDLE(), w.DWORD(), w.LPWSTR(), w.LPVOID()
+        if not security.OpenProcessToken(kernel.GetCurrentProcess(), 8, c.byref(token)):
+            raise ProbeError('CLI_PROCESS_ISOLATION_FAILED')
+        try:
+            security.GetTokenInformation(token, 1, None, 0, c.byref(needed))
+            user = c.create_string_buffer(needed.value)
+            if not security.GetTokenInformation(token, 1, user, needed, c.byref(needed)) or not security.ConvertSidToStringSidW(c.c_void_p.from_buffer(user), c.byref(sid_text)):
+                raise ProbeError('CLI_PROCESS_ISOLATION_FAILED')
+            if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW('D:P(A;;GA;;;SY)(A;;GA;;;' + sid_text.value + ')', 1, c.byref(descriptor), None):
+                raise ProbeError('CLI_PROCESS_ISOLATION_FAILED')
+            attributes = SA(c.sizeof(SA), descriptor, False)
+            kernel.CreateNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.DWORD, w.DWORD, w.DWORD, w.DWORD, c.POINTER(SA)]
+            kernel.CreateNamedPipeW.restype = w.HANDLE
+            self.path = '\\\\.\\pipe\\case-usage-' + os.urandom(24).hex()
+            self.handle = kernel.CreateNamedPipeW(self.path, 0x80001, 1, 1, 65536, 65536, 0, c.byref(attributes))
+            if self.handle == w.HANDLE(-1).value: raise ProbeError('CLI_PROCESS_ISOLATION_FAILED')
+        finally:
+            kernel.CloseHandle(token)
+            if sid_text: kernel.LocalFree(sid_text)
+            if descriptor: kernel.LocalFree(descriptor)
+        kernel.ConnectNamedPipe.argtypes = [w.HANDLE, w.LPVOID]
+        kernel.DisconnectNamedPipe.argtypes = [w.HANDLE]
+        kernel.ReadFile.argtypes = [w.HANDLE, w.LPVOID, w.DWORD, c.POINTER(w.DWORD), w.LPVOID]
+        self.kernel, self.connected = kernel, False
+
+    def read(self):
+        c, w, kernel = self.c, self.w, self.kernel
+        if not self.connected:
+            self.connected = bool(kernel.ConnectNamedPipe(self.handle, None)) or c.get_last_error() == 535
+            if not self.connected: return b''
+        data, count = c.create_string_buffer(65536), w.DWORD()
+        if not kernel.ReadFile(self.handle, data, len(data), c.byref(count), None):
+            if c.get_last_error() in (109, 233):
+                kernel.DisconnectNamedPipe(self.handle)
+                self.connected = False
+            return b''
+        return data.raw[:count.value]
+
+    def close(self):
+        self.kernel.CloseHandle(self.handle)
+
+
+def capture_windows(binary, config, workspace, deadline):
+    try:
+        from winpty import PtyProcess
+    except ImportError:
+        raise ProbeError('CONPTY_NOT_INSTALLED') from None
+    diagnostic, proc = WindowsDiagnostic(), None
+    try:
+        evidence, screen, chunks = UsageEvidence(), Screen(), queue.Queue()
+        cache_at = cached_observation_at(config, int(time.time() * 1000))
+        proc = PtyProcess.spawn(subprocess.list2cmdline(cli_arguments(binary) + ['--debug-file', diagnostic.path, '/usage']),
+                               cwd=str(workspace), env=environment(config, workspace), dimensions=(200, 160))
+        def reader():
+            while True:
+                try: value = proc.read(65536)
+                except (EOFError, OSError): value = ''
+                chunks.put(value)
+                if not value: return
+        threading.Thread(target=reader, daemon=True).start()
+        candidate_at = candidate_key = None
+        total, query_tail = 0, b''
+        while time.monotonic() < deadline:
+            debug = diagnostic.read()
+            if debug: evidence.feed(debug); total += len(debug)
+            try: text = chunks.get(timeout=.05)
+            except queue.Empty: text = None
+            if text:
+                data = text.encode('utf-8')
+                total += len(data)
+                scan = query_tail + data
+                if b'\x1b[6n' in scan: proc.write('\x1b[1;1R')
+                query_tail = scan[-3:]
+                screen.feed(data)
+            if total > 2 * 1024 * 1024: raise ProbeError('CLI_OUTPUT_LIMIT')
+            now = int(time.time() * 1000)
+            parsed = usage(screen.text(), now)
+            if parsed:
+                key = (parsed['fh'], parsed['sd'], parsed['fhResetText'], parsed['sdResetText'])
+                if key != candidate_key: candidate_key, candidate_at = key, time.monotonic()
+                if time.monotonic() - candidate_at >= 1.5:
+                    if evidence.failed: raise ProbeError('CLI_USAGE_UNAVAILABLE')
+                    if evidence.fresh: return parsed
+                    if evidence.snapshot and not evidence.request and cache_at is not None and 0 <= now - cache_at < 60000:
+                        parsed = usage(screen.text(), cache_at)
+                        parsed['age'] = now - cache_at
+                        return parsed
+                    raise ProbeError('CLI_USAGE_UNAVAILABLE')
+            else:
+                candidate_at = candidate_key = None
+            if text == '' or not proc.isalive(): raise ProbeError('CLI_USAGE_UNRECOGNIZED')
+        raise ProbeError('REFRESH_TIMEOUT')
+    finally:
+        if proc is not None: proc.close(force=True)
+        diagnostic.close()
+
+
 def capture(binary, config, workspace, deadline):
+    if os.name == 'nt':
+        return capture_windows(binary, config, workspace, deadline)
     import fcntl
     import pty
     import termios
@@ -548,6 +706,14 @@ def browser_open(value):
     try:
         authorization_url(value)
         address = os.environ['CASE_AUTH_SOCKET']
+        if os.name == 'nt':
+            port = int(address)
+            key = os.environ['CASE_AUTH_IPC_KEY']
+            if not 1 <= port <= 65535 or not re.fullmatch('[0-9a-f]{64}', key): return 1
+            with socket.create_connection(('127.0.0.1', port), timeout=16) as client:
+                client.sendall((key + '\n' + value + '\n').encode())
+                client.shutdown(socket.SHUT_WR)
+                return 0 if client.recv(16) == b'OK\n' else 1
         info, parent = os.stat(address), os.stat(Path(address).parent)
         if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
                 or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
@@ -571,9 +737,8 @@ class AuthBrowser:
         self.error = None
 
     def __enter__(self):
-        import fcntl
         base = Path(self.payload['config']).parent
-        expected = {'script': base / 'auth-browser.cjs', 'opener': base / 'browser.command',
+        expected = {'script': base / 'auth-browser.cjs', 'opener': base / ('browser.cmd' if os.name == 'nt' else 'browser.command'),
                     'userData': base / 'browser'}
         for key, path in expected.items():
             if self.browser.get(key) != str(path) or path.resolve() != path:
@@ -586,15 +751,30 @@ class AuthBrowser:
                 or Path(self.payload['config']).resolve() != Path(self.payload['config'])):
             raise ProbeError('CLI_SCOPE_INVALID')
         try:
-            self.lock = os.fdopen(os.open(base / '.auth.lock', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600), 'a')
+            lock_path = base / '.auth.lock'
+            if lock_path.is_symlink() or getattr(lock_path.lstat() if lock_path.exists() else None, 'st_file_attributes', 0) & 0x400:
+                raise ProbeError('CLI_SCOPE_INVALID')
+            self.lock = os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600), 'r+')
             try:
-                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+                if os.name == 'nt':
+                    import msvcrt
+                    msvcrt.locking(self.lock.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, PermissionError):
                 raise ProbeError('AUTH_IN_PROGRESS') from None
-            self.temp = tempfile.TemporaryDirectory(prefix='case-auth-')
-            self.address = str(Path(self.temp.name) / 's')
-            self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.server.bind(self.address)
+            if os.name == 'nt':
+                self.key = os.urandom(32).hex()
+                self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                self.server.bind(('127.0.0.1', 0))
+                self.address = str(self.server.getsockname()[1])
+            else:
+                self.temp = tempfile.TemporaryDirectory(prefix='case-auth-')
+                self.address = str(Path(self.temp.name) / 's')
+                self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                self.server.bind(self.address)
             self.server.listen(2)
             self.server.settimeout(.2)
             self.thread = threading.Thread(target=self.serve, daemon=True)
@@ -616,10 +796,16 @@ class AuthBrowser:
                 try:
                     connection.settimeout(2)
                     request = bytearray()
-                    while len(request) <= 8192:
-                        chunk = connection.recv(8193 - len(request))
+                    while len(request) <= 8258:
+                        chunk = connection.recv(8259 - len(request))
                         if not chunk: break
                         request.extend(chunk)
+                    if os.name == 'nt':
+                        key, sep, body = request.partition(b'\n')
+                        import hmac
+                        if not sep or not hmac.compare_digest(key, self.key.encode()):
+                            continue  # Unauthenticated local input cannot stop a login.
+                        request = body
                     if len(request) > 8192:
                         raise ProbeError('AUTH_BROWSER_URL_INVALID')
                     url = authorization_url(request.decode().removesuffix('\n'))
@@ -630,14 +816,22 @@ class AuthBrowser:
                     # process arguments, shell expansion or a persisted file.
                     self.child = subprocess.Popen([self.browser['binary'], self.browser['script']],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                        env=env, cwd=self.payload['workspace'], start_new_session=True)
+                        env=env, cwd=self.payload['workspace'], **({'creationflags': 0x08000000} if os.name == 'nt' else {'start_new_session': True}))
                     self.child.stdin.write((json.dumps(dict(self.browser, url=url)) + '\n').encode())
                     self.child.stdin.close()
                     deadline, received = time.monotonic() + 12, bytearray()
+                    chunks = queue.Queue()
+                    def reader():
+                        while True:
+                            try: data = os.read(self.child.stdout.fileno(), 1024)
+                            except OSError: data = b''
+                            chunks.put(data)
+                            if not data: return
+                    threading.Thread(target=reader, daemon=True).start()
                     while time.monotonic() < deadline and not self.stop.is_set():
-                        ready, _, _ = select.select([self.child.stdout], [], [], .1)
-                        if ready:
-                            chunk = os.read(self.child.stdout.fileno(), 1024)
+                        try: chunk = chunks.get(timeout=.1)
+                        except queue.Empty: continue
+                        if chunk is not None:
                             if not chunk: break
                             received.extend(chunk)
                             if b'CASE_AUTH_READY\n' in received:
@@ -661,10 +855,14 @@ class AuthBrowser:
             try:
                 if self.child.poll() is None:
                     # Only this live child process group's descendants are used.
-                    os.killpg(self.child.pid, signal.SIGTERM)
+                    if os.name == 'nt':
+                        self.child.terminate()
+                    else:
+                        os.killpg(self.child.pid, signal.SIGTERM)
                     try: self.child.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        os.killpg(self.child.pid, signal.SIGKILL)
+                        if os.name == 'nt': self.child.kill()
+                        else: os.killpg(self.child.pid, signal.SIGKILL)
             except ProcessLookupError: pass
             self.child.wait()
             for pipe in (self.child.stdin, self.child.stdout):
@@ -682,6 +880,7 @@ def login(payload):
           '完成 /usage 设置后输入 /exit，再回到 CASE 手动查询。', flush=True)
     with AuthBrowser(payload) as browser:
         env.update(BROWSER=payload['browser']['opener'], CASE_AUTH_SOCKET=browser.address)
+        if os.name == 'nt': env['CASE_AUTH_IPC_KEY'] = browser.key
         child = subprocess.Popen([payload['binary'], 'auth', 'login', '--claudeai'], env=env, cwd=workspace)
         try:
             while child.poll() is None:
@@ -701,9 +900,10 @@ def login(payload):
 
 def main():
     try:
+        if os.name == 'nt' and sys.argv[1] != 'browser': windows_job()
         if sys.argv[1] == 'browser':
             return browser_open(sys.argv[2]) if len(sys.argv) == 3 else 1
-        payload = json.loads(sys.argv[2])
+        payload = json.loads(Path(sys.argv[3]).read_text(encoding='utf-8')) if sys.argv[2] == '--payload-file' else json.loads(sys.argv[2])
         if sys.argv[1] == 'login': return login(payload)
         if sys.argv[1] == 'setup': return setup(payload)
         value = probe(payload)

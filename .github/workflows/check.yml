@@ -14,25 +14,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-2022, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - name: Linux desktop build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '22'
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: node --test tests/*.test.cjs
-      - uses: actions/setup-python@v5
-        if: runner.os == 'macOS'
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.9'
-      - name: Offline sync and usage tests
-        if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s tests/python -q
+          python-version: '3.12'
+      - name: Windows test dependencies (synthetic ConPTY only)
+        if: runner.os == 'Windows'
+        run: python -m pip install -r tools/requirements-windows.txt
+      - name: Offline verification
+        run: python tools/ci_tests.py

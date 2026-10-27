@@ -8,11 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-#[cfg(target_os = "macos")]
 const HELPER: &str = include_str!("../tools/claude_usage_probe.py");
-#[cfg(target_os = "macos")]
 const AUTH_BROWSER: &str = include_str!("../tools/claude_auth_browser.cjs");
-#[cfg(target_os = "macos")]
 const ELECTRON_VERSION: &str = "42.4.0";
 static VERSION: AtomicU64 = AtomicU64::new(1);
 fn version() -> u64 {
@@ -200,7 +197,7 @@ fn root(id: &str) -> PathBuf {
 
 fn safe_path(path: &Path) -> bool {
     path.ancestors().all(|p| {
-        std::fs::symlink_metadata(p).is_ok_and(|m| !m.file_type().is_symlink())
+        std::fs::symlink_metadata(p).is_ok_and(|m| !crate::platform::runtime::is_redirected(&m))
             || !p.exists()
                 && std::fs::symlink_metadata(p)
                     .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
@@ -262,7 +259,6 @@ pub fn record_manual(
     e.view.clone()
 }
 
-#[cfg(target_os = "macos")]
 fn private_write(path: &Path, data: &[u8]) -> Result<(), &'static str> {
     use std::io::Write;
     if !safe_path(path) {
@@ -294,125 +290,190 @@ fn private_write(path: &Path, data: &[u8]) -> Result<(), &'static str> {
     result.map_err(|_| "SAVE_FAILED")
 }
 
-#[cfg(target_os = "macos")]
 fn cli_binary() -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut paths = vec![
-        dirs::home_dir()?.join(".local/bin/claude"),
-        PathBuf::from("/opt/homebrew/bin/claude"),
-        PathBuf::from("/usr/local/bin/claude"),
-    ];
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(
-            std::env::split_paths(&path)
-                .filter(|p| p.is_absolute())
-                .map(|p| p.join("claude")),
-        );
-    }
-    paths.into_iter().find_map(|p| {
-        let resolved = p.canonicalize().ok()?;
-        let meta = std::fs::metadata(&resolved).ok()?;
-        (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(resolved)
-    })
+    let name = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
+    let local = dirs::home_dir()?.join(".local/bin").join(name);
+    crate::platform::runtime::executable(
+        &[
+            local.to_str()?,
+            "/opt/homebrew/bin/claude",
+            "/usr/local/bin/claude",
+        ],
+        name,
+    )
 }
 
-#[cfg(target_os = "macos")]
 fn payload(account: &store::Account, binding: &Binding) -> Result<serde_json::Value, &'static str> {
     let binary = cli_binary().ok_or("CLI_NOT_INSTALLED")?;
-    if !Path::new("/usr/bin/python3").is_file() {
-        return Err("PYTHON_NOT_INSTALLED");
-    }
+    let python = crate::platform::runtime::python().ok_or("PYTHON_NOT_INSTALLED")?;
     let base = root(&account.id);
     if !safe_path(&base) {
         return Err("CLI_SCOPE_INVALID");
     }
-    let base = base.canonicalize().map_err(|_| "CLI_SCOPE_INVALID")?;
+    let base = crate::platform::runtime::canonical(&base).ok_or("CLI_SCOPE_INVALID")?;
     Ok(serde_json::json!({
         "binary": binary, "config": base.join("cli"), "workspace": base.join("workspace"),
         "accountHash": binding.account_hash, "organizationHash": binding.organization_hash,
-        "label": account.name,
+        "label": account.name, "python": python,
     }))
 }
 
-#[cfg(target_os = "macos")]
 fn electron_binary() -> Result<PathBuf, &'static str> {
-    use std::os::unix::fs::PermissionsExt;
+    let executable = if cfg!(target_os = "macos") {
+        "Electron.app/Contents/MacOS/Electron"
+    } else if cfg!(windows) {
+        "electron.exe"
+    } else {
+        "electron"
+    };
     let path = store::conf_dir()
         .join("auth-runtime")
         .join(ELECTRON_VERSION)
-        .join("Electron.app/Contents/MacOS/Electron");
-    if !safe_path(&path)
-        || !std::fs::metadata(&path)
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    {
+        .join(executable);
+    if !safe_path(&path) || !path.is_file() {
         return Err("AUTH_BROWSER_NOT_INSTALLED");
     }
-    path.canonicalize()
-        .map_err(|_| "AUTH_BROWSER_NOT_INSTALLED")
+    crate::platform::runtime::executable(
+        &[path.to_str().ok_or("AUTH_BROWSER_NOT_INSTALLED")?],
+        "case-no-fallback-electron",
+    )
+    .ok_or("AUTH_BROWSER_NOT_INSTALLED")
 }
 
-#[cfg(target_os = "macos")]
 fn open_terminal(
     account: &store::Account,
     binding: &Binding,
     operation: &str,
 ) -> Result<(), &'static str> {
     let mut data = payload(account, binding)?;
-    let base = root(&account.id);
+    let base =
+        crate::platform::runtime::canonical(&root(&account.id)).ok_or("CLI_SCOPE_INVALID")?;
+    let python = crate::platform::runtime::python().ok_or("PYTHON_NOT_INSTALLED")?;
     private_write(&base.join("probe.py"), HELPER.as_bytes())?;
+    #[cfg(unix)]
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
     if operation == "login" {
         let binary = electron_binary()?;
         let browser_script = base.join("auth-browser.cjs");
-        let opener = base.join("browser.command");
+        let opener = base.join(if cfg!(windows) {
+            "browser.cmd"
+        } else {
+            "browser.command"
+        });
         private_write(&browser_script, AUTH_BROWSER.as_bytes())?;
+        #[cfg(unix)]
         private_write(
             &opener,
             format!(
-                "#!/bin/zsh\nexec /usr/bin/python3 -I {} browser \"$@\"\n",
+                "#!/bin/sh\nexec {} -I {} browser \"$@\"\n",
+                quote(&python.to_string_lossy()),
                 quote(&base.join("probe.py").to_string_lossy())
             )
             .as_bytes(),
         )?;
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| "SAVE_FAILED")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| "SAVE_FAILED")?;
+        }
+        #[cfg(windows)]
+        private_write(
+            &opener,
+            format!(
+                "@echo off\r\n\"{}\" -I \"{}\" browser \"%~1\"\r\n",
+                python.to_string_lossy().replace('%', "%%"),
+                base.join("probe.py").to_string_lossy().replace('%', "%%")
+            )
+            .as_bytes(),
+        )?;
         data["browser"] = serde_json::json!({
             "binary": binary, "script": browser_script, "opener": opener,
             "userData": base.join("browser"), "label": account.name,
         });
     }
-    let script = format!(
-        "#!/bin/zsh\n/usr/bin/python3 -I {} {} {}\n",
-        quote(&base.join("probe.py").to_string_lossy()),
-        operation,
-        quote(&data.to_string())
-    );
-    let script_path = base.join(if operation == "login" {
-        "connect.command"
-    } else {
-        "setup.command"
-    });
-    private_write(&script_path, script.as_bytes())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| "SAVE_FAILED")?;
-    let result = std::process::Command::new("/usr/bin/open")
-        .args(["-a", "Terminal"])
-        .arg(script_path)
-        .status()
-        .map_err(|_| "CLI_TERMINAL_FAILED")?;
-    if !result.success() {
-        return Err("CLI_TERMINAL_FAILED");
+    #[cfg(windows)]
+    {
+        // Data lives in a JSON file so account names cannot become cmd code.
+        let payload_file = base.join(format!("{operation}.json"));
+        private_write(&payload_file, data.to_string().as_bytes())?;
+        let script_path = base.join(format!("{operation}.cmd"));
+        let q = |p: &Path| p.to_string_lossy().replace('%', "%%");
+        private_write(&script_path, format!("@echo off\r\n\"{}\" -I \"{}\" {} --payload-file \"{}\"\r\nif errorlevel 1 pause\r\n", q(&python), q(&base.join("probe.py")), operation, q(&payload_file)).as_bytes())?;
+        // ShellExecute opens a visible console; the child never inherits a
+        // developer shell's keys, injected settings or default account.
+        let result = crate::platform::run(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "Start-Process -FilePath {}",
+                    crate::platform::pq(&script_path.to_string_lossy())
+                ),
+            ],
+            crate::platform::secs(10),
+        );
+        if result.ok {
+            Ok(())
+        } else {
+            Err("CLI_TERMINAL_FAILED")
+        }
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        let script = format!(
+            "#!/bin/sh\n{} -I {} {} {}\n",
+            quote(&python.to_string_lossy()),
+            quote(&base.join("probe.py").to_string_lossy()),
+            operation,
+            quote(&data.to_string())
+        );
+        let script_path = base.join(if operation == "login" {
+            "connect.command"
+        } else {
+            "setup.command"
+        });
+        private_write(&script_path, script.as_bytes())?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "SAVE_FAILED")?;
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("/usr/bin/open")
+            .args(["-a", "Terminal"])
+            .arg(script_path)
+            .status()
+            .map_err(|_| "CLI_TERMINAL_FAILED")?;
+        #[cfg(target_os = "linux")]
+        let result = std::process::Command::new("x-terminal-emulator")
+            .arg("-e")
+            .arg(&script_path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "CLI_TERMINAL_FAILED");
+        #[cfg(target_os = "linux")]
+        {
+            result
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if !result.success() {
+                return Err("CLI_TERMINAL_FAILED");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Open the account's CLI with its existing identity-bound official login.
 /// The same entry point also lets the user complete first-run prompts.
 /// This path neither replaces the binding nor starts another auth login.
 pub fn setup(account: &store::Account) -> Result<Snapshot, &'static str> {
-    #[cfg(target_os = "macos")]
     {
         let current = scope(account);
         if current.invalid {
@@ -431,22 +492,14 @@ pub fn setup(account: &store::Account) -> Result<Snapshot, &'static str> {
         )?;
         Ok(snapshot(account))
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = account;
-        Err("PLATFORM_UNSUPPORTED")
-    }
 }
 
 pub fn connect(account: &store::Account) -> Result<Snapshot, &'static str> {
-    #[cfg(target_os = "macos")]
     {
         // Detect dependencies before creating or replacing any binding.
         cli_binary().ok_or("CLI_NOT_INSTALLED")?;
         electron_binary()?;
-        if !Path::new("/usr/bin/python3").is_file() {
-            return Err("PYTHON_NOT_INSTALLED");
-        }
+        crate::platform::runtime::python().ok_or("PYTHON_NOT_INSTALLED")?;
         let identity = usage::identity(&account.dir).ok_or("DESKTOP_IDENTITY_MISSING")?;
         let base = root(&account.id);
         for name in ["cli", "workspace"] {
@@ -465,11 +518,6 @@ pub fn connect(account: &store::Account) -> Result<Snapshot, &'static str> {
         )?;
         open_terminal(account, &b, "login")?;
         Ok(snapshot(account))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = account;
-        Err("PLATFORM_UNSUPPORTED")
     }
 }
 
@@ -500,9 +548,9 @@ impl ProbeResult {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn execute(account: &store::Account, b: &Binding) -> ProbeResult {
     use std::io::Read;
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -510,13 +558,18 @@ fn execute(account: &store::Account, b: &Binding) -> ProbeResult {
         Ok(v) => v,
         Err(code) => return ProbeResult::error(code),
     };
-    let mut command = Command::new("/usr/bin/python3");
+    let Some(python) = crate::platform::runtime::python() else {
+        return ProbeResult::error("PYTHON_NOT_INSTALLED");
+    };
+    let mut command = Command::new(python);
     command
         .args(["-I", "-c", HELPER, "probe", &data.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    crate::platform::hide_console(&mut command);
     let mut child = match command.spawn() {
         Ok(v) => v,
         Err(_) => return ProbeResult::error("CLI_PROBE_FAILED"),
@@ -524,6 +577,7 @@ fn execute(account: &store::Account, b: &Binding) -> ProbeResult {
     // Every descendant of this helper stays in our new process group. Always
     // reap it, including after a normal exit or inherited-pipe timeout. Never
     // inspect or signal an existing Claude process.
+    #[cfg(unix)]
     let pid = child.id() as i32;
     let stdout = child.stdout.take().expect("piped stdout");
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -549,9 +603,14 @@ fn execute(account: &store::Account, b: &Binding) -> ProbeResult {
         }
     }
     // SAFETY: pid names only the process group created immediately above.
+    #[cfg(unix)]
     unsafe {
         libc::kill(-pid, libc::SIGKILL);
     }
+    #[cfg(windows)]
+    {
+        let _ = child.kill();
+    } // Python's private Job Object owns only this probe tree.
     let _ = child.wait();
     let Ok((Ok(_), bytes)) = receiver.recv_timeout(Duration::from_secs(1)) else {
         return ProbeResult::error("CLI_PROBE_FAILED");
@@ -563,11 +622,6 @@ fn execute(account: &store::Account, b: &Binding) -> ProbeResult {
         return ProbeResult::error("CLI_PROBE_FAILED");
     }
     serde_json::from_slice(&bytes).unwrap_or_else(|_| ProbeResult::error("CLI_PROBE_FAILED"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn execute(_: &store::Account, _: &Binding) -> ProbeResult {
-    ProbeResult::error("PLATFORM_UNSUPPORTED")
 }
 
 /// Explicit user query. Status polling and opening a page never invoke this.

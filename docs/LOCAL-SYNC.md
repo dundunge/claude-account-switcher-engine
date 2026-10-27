@@ -14,6 +14,8 @@ See [MANUAL-USAGE.md](MANUAL-USAGE.md) and [NATIVE-USAGE.md](NATIVE-USAGE.md).
 
 ## Runtime
 
+跨平台 0.4.0 新安装见 [CROSS-PLATFORM.md](CROSS-PLATFORM.md)。以下路径为 macOS；Windows 使用 `%APPDATA%`，Linux 使用 XDG 配置目录。
+
 - Engine: `~/Library/Application Support/ClaudeSessionSync/engine/claude_session_sync.py`
 - Bridge: `~/Library/Application Support/ClaudeSessionSync/CASE/case_sync_bridge.py`
 - Hook: `~/Library/Application Support/ClaudeSessionSync/CASE/hook.json`

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import fcntl
 import hashlib
 import importlib.util
 import json
@@ -27,7 +26,7 @@ class BridgeError(Exception):
 
 MAX_ACCOUNTS = 8
 DEFAULT_PROFILE_NAME = "Claude"
-BRIDGE_VERSION = "0.3.0"
+BRIDGE_VERSION = "0.4.0"
 
 
 def progress(stage):
@@ -49,11 +48,11 @@ def checked(path):
     if not path.is_absolute() or ".." in path.parts:
         raise BridgeError("ABSOLUTE_PATH_REQUIRED")
     for p in [*reversed(path.parents), path]:
-        if p.is_symlink():
+        if p.is_symlink() or p.exists() and getattr(p.lstat(), 'st_file_attributes', 0) & 0x400:
             raise BridgeError("SYMLINK_REFUSED")
     info = path.stat()
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-            or info.st_mode & 0o022 or info.st_uid not in (0, os.getuid())
+            or os.name != 'nt' and (info.st_mode & 0o022 or info.st_uid not in (0, os.getuid()))
             or info.st_size > 1024 * 1024):
         raise BridgeError("UNSAFE_HOOK_FILE")
     return path
@@ -74,14 +73,14 @@ def load_engine(config):
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    if module.VERSION != "0.3.0":
+    if module.VERSION not in ("0.3.0", "0.4.0"):
         raise BridgeError("UNSUPPORTED_ENGINE_VERSION")
     return module
 
 
 def check_bridge_hash(config):
     configured_version = config.get("bridge_version")
-    if configured_version is not None and configured_version != BRIDGE_VERSION:
+    if configured_version is not None and configured_version not in ('0.3.0', BRIDGE_VERSION):
         raise BridgeError("UNSUPPORTED_BRIDGE_VERSION")
     expected = config.get("bridge_sha256")
     if expected is None:
@@ -94,18 +93,18 @@ def check_bridge_hash(config):
 
 def discover(config, target, engine):
     """Only CASE's explicit account list and the old opt-in partitions are used."""
-    legacy = engine.Config.load(checked(config["source_config_path"]))
-    if legacy.locations:
+    legacy = engine.Config.load(checked(config["source_config_path"])) if config.get('source_config_path') else None
+    if legacy and legacy.locations:
         raise BridgeError("LEGACY_SCHEMA_ONE_REQUIRED")
     accounts = read_json(config["case_accounts_path"]).get("accounts")
     if not isinstance(accounts, list) or not 1 <= len(accounts) <= MAX_ACCOUNTS:
         raise BridgeError("CASE_ACCOUNTS_REQUIRED")
-    parent = engine.absolute(config["profiles_parent"])
+    parents = [engine.absolute(p) for p in config.get('profiles_parents', [config.get('profiles_parent')])]
     target = engine.absolute(str(target))
-    engine.safe_chain(parent)
+    for parent in parents: engine.safe_chain(parent)
     partitions = [{"profile": "legacy-" + str(i), "index_root": str(legacy.index_root),
                    "account": peer.split('/')[0], "organization": peer.split('/')[1]}
-                  for i, peer in enumerate(legacy.peers)]
+                  for i, peer in enumerate(legacy.peers)] if legacy else []
     seen_dirs, seen_ids, target_seen, bootstrap = set(), set(), False, False
     initialized = 0
     for row in accounts:
@@ -114,7 +113,7 @@ def discover(config, target, engine):
         if (not isinstance(identity, str) or not re.fullmatch(engine.UUID, identity)
                 or directory in seen_dirs or identity in seen_ids):
             raise BridgeError("DUPLICATE_OR_INVALID_CASE_ACCOUNT")
-        if directory.parent != parent or not valid_profile_name(directory.name):
+        if directory.parent not in parents or not valid_profile_name(directory.name):
             raise BridgeError("UNEXPECTED_PROFILE_LOCATION")
         engine.safe_chain(directory)
         if not directory.is_dir():
@@ -151,8 +150,8 @@ def discover(config, target, engine):
                            "index_root": str(root), "account": account, "organization": org})
     if not target_seen:
         raise BridgeError("TARGET_NOT_CONFIGURED_IN_CASE")
-    value = {"schema_version": 2, "projects_root": str(legacy.projects_root),
-             "state_dir": str(legacy.state_dir), "partitions": partitions}
+    value = {"schema_version": 2, "projects_root": str(legacy.projects_root if legacy else engine.absolute(config['projects_root'])),
+             "state_dir": str(legacy.state_dir if legacy else engine.absolute(config['state_dir'])), "partitions": partitions}
     return value, bootstrap, initialized
 
 
@@ -173,6 +172,36 @@ def graceful_close(engine, timeout=15):
     except engine.SyncError as error:
         if error.code != "CLAUDE_MUST_BE_FULLY_CLOSED":
             raise
+    if sys.platform != 'darwin':
+        # A window-close request is the only permitted automation. Wayland and
+        # windowless/background instances must be quit by the user instead.
+        if os.name == 'nt':
+            command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                "Get-Process -Name claude,claude-desktop -ErrorAction SilentlyContinue | ForEach-Object { if ($_.MainWindowHandle -ne 0) { [void]$_.CloseMainWindow() } }"]
+        else:
+            result = subprocess.run(['wmctrl', '-lp'], capture_output=True, timeout=5)
+            if result.returncode: raise BridgeError('CLAUDE_QUIT_REQUEST_FAILED')
+            # Match PIDs by their executable names; never infer from window titles.
+            windows = []
+            for line in result.stdout.decode(errors='replace').splitlines():
+                cols = line.split(None, 4)
+                if len(cols) < 3 or not cols[2].isdigit(): continue
+                try: name = Path(os.readlink('/proc/' + cols[2] + '/exe')).name.lower()
+                except OSError: continue
+                if name in ('claude', 'claude-desktop'): windows.append(cols[0])
+            if not windows: raise BridgeError('CLAUDE_STILL_RUNNING')
+            command = None
+            for window in windows:
+                subprocess.run(['wmctrl', '-ic', window], check=True, timeout=5)
+        if command:
+            subprocess.run(command, check=True, timeout=8, **({'creationflags': 0x08000000} if os.name == 'nt' else {}))
+        deadline = time.monotonic() + timeout
+        while True:
+            try: engine.assert_stopped(); return
+            except engine.SyncError as error:
+                if error.code != 'CLAUDE_MUST_BE_FULLY_CLOSED': raise
+            if time.monotonic() >= deadline: raise BridgeError('CLAUDE_STILL_RUNNING')
+            time.sleep(.2)
     # NSRunningApplication.terminate requests normal application termination.
     # It does not send SIGTERM/SIGKILL and does not bypass a task/quit dialog.
     try:
@@ -199,14 +228,14 @@ def switch_lock(engine, state):
     engine.mkdir_private(state)
     path = state / 'case-switch.lock'
     engine.safe_chain(path)
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = engine.safe_open(path, os.O_CREAT | os.O_RDWR)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise BridgeError("INVALID_SWITCH_LOCK")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            engine.lock_fd(fd)
+        except (BlockingIOError, PermissionError):
             raise BridgeError("SWITCH_ALREADY_RUNNING") from None
         yield
     finally:
@@ -217,6 +246,17 @@ def run(config, target, engine, dry_run=False):
     if config.get("schema_version") != 1 or config.get("hook_enabled") is not True:
         raise BridgeError("CASE_SYNC_NOT_ENABLED")
     value, bootstrap, initialized = discover(config, target, engine)
+    if len(value['partitions']) < 2:
+        # First sign-in needs no index writes. Keep normal-exit and scope
+        # checks, then let the user initialize the first/second official profile.
+        pending = engine.Config(None, engine.absolute(value['projects_root']), engine.absolute(value['state_dir']), ())
+        if engine.unfinished(pending): raise BridgeError('RECOVERY_REQUIRED')
+        if not dry_run:
+            graceful_close(engine)
+            if discover(config, target, engine)[0] != value:
+                raise BridgeError('PROFILE_SCOPE_CHANGED_RETRY')
+        return {'status': 'preview' if dry_run else 'unchanged', 'bootstrap': bootstrap,
+                'initialized_profiles': initialized, 'partition_count': len(value['partitions'])}
     c = engine.Config.load_multi(value)
     if engine.unfinished(c):
         raise BridgeError("RECOVERY_REQUIRED")

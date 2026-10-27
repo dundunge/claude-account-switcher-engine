@@ -243,11 +243,21 @@ pub fn activate_profile(dir: &Path) {
 /// Ask one Claude instance to quit, leaving any other account running.
 pub fn quit_profile(dir: &Path) -> Result<usize, String> {
     let pid = live_pid_for(dir).ok_or("Could not find the process for that account.")?;
-    let taskkill = system32("taskkill.exe");
-    let pid_s = pid.to_string();
-    // /T without /F posts WM_CLOSE through the tree, so Electron raises its close
-    // event and Claude saves on the way out. Force is the escalation, not the plan.
-    run(&taskkill, &["/PID", &pid_s, "/T"], secs(8));
+    let result = run(
+        "powershell.exe",
+        &[
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "$p = Get-Process -Id {pid} -ErrorAction Stop; if ($p.ProcessName -ne 'claude' -or -not $p.CloseMainWindow()) {{ exit 1 }}"
+            ),
+        ],
+        secs(8),
+    );
+    if !result.ok {
+        return Err("Claude did not accept the quit request. Quit normally in Claude.".into());
+    }
     for _ in 0..25 {
         if !pid_live(pid) {
             break;
@@ -255,7 +265,7 @@ pub fn quit_profile(dir: &Path) -> Result<usize, String> {
         std::thread::sleep(Duration::from_millis(200));
     }
     if pid_live(pid) {
-        run(&taskkill, &["/PID", &pid_s, "/T", "/F"], secs(8));
+        return Err("Claude is still running. Finish your work and quit normally.".into());
     }
     Ok(1)
 }

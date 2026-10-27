@@ -63,7 +63,7 @@ def install(apply=False):
     engine_source = ROOT / "engine/claude_session_sync.py"
     bridge_source = ROOT / "tools/case_sync_bridge.py"
     engine = load_engine(engine_source)
-    if engine.VERSION != "0.3.0":
+    if engine.VERSION != "0.4.0":
         raise RuntimeError("UNSUPPORTED_ENGINE")
     config = engine.Config.load(old_config)
     profiles = [support / "Claude-Pro-A", support / "Claude-Pro-B"]
@@ -128,7 +128,7 @@ def install(apply=False):
             engine.atomic_write(bridge_path, engine.File(bridge_source.read_bytes(), time.time_ns(), 0o700), creating=True)
             hook = {'schema_version': 1, 'hook_enabled': True,
                     'python_path': '/usr/bin/python3', 'bridge_path': str(bridge_path),
-                    'bridge_version': '0.3.0', 'bridge_sha256': sha(bridge_source),
+                    'bridge_version': '0.4.0', 'bridge_sha256': sha(bridge_source),
                     'engine_path': str(engine_path), 'engine_sha256': sha(engine_path),
                     'source_config_path': str(old_config),
                     'case_accounts_path': str(accounts_path), 'profiles_parent': str(support)}

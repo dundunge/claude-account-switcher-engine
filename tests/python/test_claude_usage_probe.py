@@ -254,6 +254,7 @@ class ResetTests(unittest.TestCase):
         self.assertFalse(value['sdResetEstimated'])
 
 
+@unittest.skipIf(os.name == 'nt', 'Unix PTY/account fixtures; Windows transport has dedicated synthetic tests')
 class AccountTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='case-usage-offline-')

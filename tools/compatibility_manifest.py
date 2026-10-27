@@ -58,9 +58,9 @@ def build(root: Path, app: Path | None) -> dict:
             "sha256": {str(path): sha(path) for path in native},
         },
         "usage_monitor": {
-            "platform": "macOS",
+            "platform": ["macOS", "Windows", "Linux"],
             "provider": "official Claude Code /usage",
-            "query_mode": "manual_only",
+            "query_mode": "manual_or_opt_in_scheduled",
             "sha256": {
                 str(path): sha(path) for path in [
                     root / "src/usage_monitor.rs",

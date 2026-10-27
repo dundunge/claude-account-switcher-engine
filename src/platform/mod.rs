@@ -26,6 +26,14 @@ mod win;
 #[cfg(windows)]
 pub use win::*;
 
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::*;
+
+/// Python/CLI paths used by CASE's account-scoped helpers.
+pub mod runtime;
+
 pub struct Output {
     pub ok: bool,
     pub out: String,

@@ -6,16 +6,17 @@
 
 const api = window.api
 const IS_WIN = api.platform === 'win32'
-document.documentElement.classList.toggle('win', IS_WIN)
+const IS_MAC = api.platform === 'darwin'
+document.documentElement.classList.toggle('win', !IS_MAC)
 
-const fileManager = () => IS_WIN ? tr("文件资源管理器", "Explorer") : tr("访达", "Finder")
+const fileManager = () => IS_WIN ? tr("文件资源管理器", "Explorer") : IS_MAC ? tr("访达", "Finder") : tr("文件管理器", "File manager")
 
 /** Whether the platform's command key is down: Ctrl on Windows, Command on a Mac. */
-const modDown = e => (IS_WIN ? e.ctrlKey : e.metaKey)
+const modDown = e => (IS_MAC ? e.metaKey : e.ctrlKey)
 
 /** A shortcut as this platform writes one: ⇧⌘R on a Mac, Ctrl+Shift+R on Windows. */
 function combo (key, { shift = false, alt = false } = {}) {
-  if (IS_WIN) return ['Ctrl', alt && 'Alt', shift && 'Shift', key].filter(Boolean).join('+')
+  if (!IS_MAC) return ['Ctrl', alt && 'Alt', shift && 'Shift', key].filter(Boolean).join('+')
   return (alt ? '⌥' : '') + (shift ? '⇧' : '') + '⌘' + key
 }
 

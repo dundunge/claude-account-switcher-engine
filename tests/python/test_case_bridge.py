@@ -118,7 +118,7 @@ class CaseBridgeTests(unittest.TestCase):
         orphan = {
             'localId': 'local_' + base.SID,
             'cliSessionId': base.CLI,
-            'cwd': '/offline/project',
+            'cwd': str(self.root / 'offline-project'),
             'createdAt': 1790000000000,
             'lastActivityAt': 1790000001000,
             'title': 'Recovered',
@@ -148,7 +148,7 @@ class CaseBridgeTests(unittest.TestCase):
         orphan = {
             'localId': 'local_' + base.SID,
             'cliSessionId': base.CLI,
-            'cwd': '/offline/project',
+            'cwd': str(self.root / 'offline-project'),
             'createdAt': 1790000000000,
             'lastActivityAt': 1790000001000,
         }

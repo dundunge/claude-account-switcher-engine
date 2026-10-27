@@ -25,7 +25,7 @@ Claude remains responsible for authenticating and obtaining its own usage data.
    a saved observation is restored. No credential or chat text is saved.
 
 With no independent CLI binding, users can read an open profile's panel or explicitly re-read saved records.
-Switching accounts is still a separate action. The local session sync engine remains version 0.3.0.
+Switching accounts is still a separate action. New source includes sync engine 0.4.0; existing macOS 0.3.0 hooks remain compatible and are not automatically replaced. See CROSS-PLATFORM.md.
 
 ## Limits
 

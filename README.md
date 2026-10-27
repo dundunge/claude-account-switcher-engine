@@ -112,9 +112,9 @@ CASE 从架构设计上就明确排除了反向代理、API 网关中转或请�
 
 ## 安装、构建与使用
 
-当前独立版本的完整集成以 **macOS** 为目标。Windows 保留代码编译检查，同步与官方额度接入尚未完成集成，暂不提供 Windows 安装包。
+**主要在 macOS 开发与使用。Windows、Linux 已增加平台适配与安装包构建，但未经真实账号及桌面操作实测，属于实验支持。** Windows 提供 x64 安装程序与便携包，Linux 提供 x64 `.deb` / `.AppImage`，macOS 提供 Apple Silicon / Intel 通用包。自动化编译和模拟测试通过不等于真实使用验收；详见[跨平台说明](docs/CROSS-PLATFORM.md)。
 
-**首次使用需先准备同步配置、官方 Claude Code 和 Electron 授权组件。仅构建或复制应用不等于完成初始化；当前没有通用的一键初始化器。** 参见[同步边界](docs/LOCAL-SYNC.md)与[授权准备](docs/MANUAL-USAGE.md)。
+**首次使用需先准备同步配置、官方 Claude Code 和 Electron 授权组件。** 新安装可使用 `tools/prepare_local_sync.py` 先预览，再显式初始化；已有配置不会覆盖。Windows 额度查询另需独立 Python / ConPTY 组件。仅安装应用不等于完成初始化，步骤见[跨平台说明](docs/CROSS-PLATFORM.md)、[同步边界](docs/LOCAL-SYNC.md)与[授权准备](docs/MANUAL-USAGE.md)。
 
 ### 日常更新覆盖
 如果已配置同步环境，且该次发布明确同步引擎未变：

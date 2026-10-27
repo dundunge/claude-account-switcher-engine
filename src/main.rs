@@ -1469,7 +1469,7 @@ fn apply_presentation(app: &AppHandle) {
     let hide = s.menu_bar && s.hide_dock;
     #[cfg(target_os = "macos")]
     let _ = app.set_dock_visibility(!hide);
-    #[cfg(windows)]
+    #[cfg(not(target_os = "macos"))]
     if let Some(w) = main_window(app) {
         let _ = w.set_skip_taskbar(hide);
     }

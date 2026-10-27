@@ -1,6 +1,7 @@
 .DS_Store
 target/
 out/
+dist/
 # written by tauri-build on every build
 gen/
 __pycache__/

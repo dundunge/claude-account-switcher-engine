@@ -70,5 +70,5 @@ window.api = {
   onUpdateProgress: cb => on('update:progress', cb),
   // Not a command: the pages need this on every keystroke, to tell Ctrl from
   // Command.
-  platform: navigator.userAgent.includes('Windows') ? 'win32' : 'darwin'
+  platform: navigator.userAgent.includes('Windows') ? 'win32' : navigator.userAgent.includes('Linux') ? 'linux' : 'darwin'
 }

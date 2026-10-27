@@ -8,6 +8,8 @@ function quotaError (code) {
   const messages = {
     CLI_NOT_INSTALLED: tr('请先安装官方 Claude Code，再为各账号连接独立额度查询。', 'Install official Claude Code, then connect usage queries for each account.'),
     PYTHON_NOT_INSTALLED: tr('未找到系统 Python 3，暂时无法查询。', 'System Python 3 was not found; usage cannot be queried.'),
+    CONPTY_NOT_INSTALLED: tr('Windows 查询需要 CASE 的独立 Python / ConPTY 组件，请按跨平台安装说明准备。', 'Windows queries require CASE’s isolated Python / ConPTY component. Follow the platform setup guide.'),
+    CLI_PROCESS_ISOLATION_FAILED: tr('无法建立独立查询进程范围，已停止查询。', 'Could not isolate the query process. The query was stopped.'),
     CLI_AUTH_REQUIRED: tr('请在官方登录窗口完成该账号的授权，然后点击查询。', 'Complete this account’s authorization in the official login window, then click Query.'),
     CLI_IDENTITY_MISMATCH: tr('额度登录与此账号的 account/org 不一致，已停止查询。请连接正确账号。', 'The usage login does not match this account and organization. Queries stopped; connect the matching account.'),
     CLI_IDENTITY_UNAVAILABLE: tr('无法确认额度登录的账号身份，请重新连接。', 'The usage login identity could not be confirmed. Reconnect this account.'),

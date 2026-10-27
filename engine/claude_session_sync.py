@@ -6,7 +6,6 @@ import argparse
 import contextlib
 import ctypes
 import dataclasses
-import fcntl
 import hashlib
 import json
 import os
@@ -19,7 +18,7 @@ import tempfile
 import time
 import uuid
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 LOCAL = re.compile(r"local_(" + UUID + r")\.json\Z")
 DELETED = re.compile(r"deleted_((?:local_)?" + UUID + r")\Z")
@@ -54,6 +53,10 @@ RENAME_NOREPLACE_LINUX = 1
 
 
 def _rename_noreplace(source, destination):
+    if os.name == 'nt':
+        # Windows rename is atomic and refuses an existing destination.
+        os.rename(source, destination)
+        return
     source_b, destination_b = os.fsencode(source), os.fsencode(destination)
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin" and hasattr(libc, "renameatx_np"):
@@ -70,7 +73,7 @@ def _rename_noreplace(source, destination):
         fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
                        ctypes.c_char_p, ctypes.c_uint]
         fn.restype = ctypes.c_int
-        if fn(AT_FDCWD, source_b, AT_FDCWD, destination_b, RENAME_NOREPLACE_LINUX) == 0:
+        if fn(-100, source_b, -100, destination_b, RENAME_NOREPLACE_LINUX) == 0:
             return
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), destination)
@@ -128,7 +131,7 @@ def safe_chain(path):
             s = p.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISLNK(s.st_mode):
+        if stat.S_ISLNK(s.st_mode) or getattr(s, 'st_file_attributes', 0) & 0x400:
             raise SyncError("SYMLINK_REFUSED")
         if p != path and not stat.S_ISDIR(s.st_mode):
             raise SyncError("INVALID_PARENT")
@@ -143,6 +146,51 @@ def mkdir_private(path):
         raise SyncError("DIRECTORY_REQUIRED")
 
 
+def lock_fd(fd):
+    """Nonblocking process lock; closing the descriptor releases it."""
+    if os.name == 'nt':
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def safe_open(path, flags):
+    """Refuse links at the final open as well as in every parent."""
+    safe_chain(path)
+    if os.name != 'nt':
+        return os.open(str(path), flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    import msvcrt
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    class Attributes(ctypes.Structure):
+        _fields_ = [('attributes', w.DWORD), ('tag', w.DWORD)]
+    handle = kernel.CreateFileW(str(path), 0xC0000000 if flags & os.O_RDWR else 0x80000000,
+                               7, None, 4 if flags & os.O_CREAT else 3, 0x00200000, None)
+    if handle == w.HANDLE(-1).value:
+        error = ctypes.get_last_error()
+        if error in (2, 3): raise FileNotFoundError(str(path))
+        raise OSError(error, 'Cannot safely open file')
+    transferred = False
+    try:
+        info = Attributes()
+        if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            raise OSError('Cannot verify file attributes')
+        if info.attributes & (0x400 | 0x10):
+            raise SyncError('NONREGULAR_OR_HARDLINK_REFUSED')
+        fd = msvcrt.open_osfhandle(handle, (os.O_RDWR if flags & os.O_RDWR else os.O_RDONLY) | os.O_BINARY)
+        transferred = True
+        return fd
+    finally:
+        if not transferred: kernel.CloseHandle(handle)
+
+
 @dataclasses.dataclass(frozen=True)
 class File:
     data: bytes
@@ -153,7 +201,7 @@ class File:
 def read_file(path):
     safe_chain(path)
     try:
-        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = safe_open(path, os.O_RDONLY)
     except FileNotFoundError:
         return None
     except OSError:
@@ -617,20 +665,31 @@ def build_plan(c, seed=None):
 
 
 def assert_stopped():
-    if sys.platform != "darwin":
-        raise SyncError("MACOS_REQUIRED_FOR_APPLY")
     try:
-        p = subprocess.run(["/bin/ps", "-axo", "comm="], capture_output=True, check=True, timeout=5)
+        if os.name == 'nt':
+            # Names only. Never collect command lines or credentials.
+            p = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                'Get-Process -ErrorAction Stop | ForEach-Object { $_.ProcessName }'],
+                capture_output=True, check=True, timeout=8, creationflags=0x08000000)
+        elif sys.platform in ('darwin', 'linux'):
+            p = subprocess.run(["/bin/ps", "-axo", "comm="], capture_output=True, check=True, timeout=5)
+        else:
+            raise SyncError('PLATFORM_UNSUPPORTED')
     except (OSError, subprocess.SubprocessError):
         raise SyncError("PROCESS_STATE_UNKNOWN") from None
     for command in p.stdout.decode(errors="replace").splitlines():
         name = Path(command.strip()).name
-        if "claude.app/contents/" in command.lower() or re.fullmatch(r"Claude(?: Helper(?: \([^)]*\))?)?", name):
+        desktop = ("claude.app/contents/" in command.lower() or re.fullmatch(r"Claude(?: Helper(?: \([^)]*\))?)?", name)) if sys.platform == 'darwin' else re.fullmatch(r"claude(?:-desktop|[- ]helper(?: \([^)]*\))?)?(?:\.exe)?", name, re.I)
+        if desktop:
             raise SyncError("CLAUDE_MUST_BE_FULLY_CLOSED")
 
 
 def fsync_dir(path):
     safe_chain(path)
+    if os.name == 'nt':
+        # Windows has no portable directory fsync. Each file is flushed before
+        # replace; snapshots remain available after an interrupted transaction.
+        return
     fd = os.open(str(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -644,11 +703,12 @@ def atomic_write(path, f, creating=False):
     fd, temp = tempfile.mkstemp(prefix=".session-sync-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as out:
-            os.fchmod(out.fileno(), f.mode & 0o777)
+            if os.name != 'nt':
+                os.fchmod(out.fileno(), f.mode & 0o777)
             out.write(f.data)
             out.flush()
             os.fsync(out.fileno())
-            os.utime(out.fileno(), ns=(f.mtime, f.mtime))
+            os.utime(temp if os.name == 'nt' else out.fileno(), ns=(f.mtime, f.mtime))
             os.fsync(out.fileno())
         if creating:
             # Atomic create without replacing a file created by somebody else.
@@ -657,6 +717,19 @@ def atomic_write(path, f, creating=False):
             # reader must reject and the recovery journal can no longer scan.
             _rename_noreplace(temp, str(path))
         else:
+            if os.name == 'nt' and path.exists():
+                # Preserve the destination's DACL, never copy another account's
+                # permissions from a source index or reset a custom target ACL.
+                from ctypes import wintypes as w
+                api = ctypes.WinDLL('advapi32', use_last_error=True)
+                api.GetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID, w.DWORD, ctypes.POINTER(w.DWORD)]
+                api.SetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, w.LPVOID]
+                needed = w.DWORD()
+                api.GetFileSecurityW(str(path), 4, None, 0, ctypes.byref(needed))
+                if not needed.value: raise SyncError('FILE_PERMISSIONS_UNAVAILABLE')
+                descriptor = ctypes.create_string_buffer(needed.value)
+                if not api.GetFileSecurityW(str(path), 4, descriptor, len(descriptor), ctypes.byref(needed)) or not api.SetFileSecurityW(temp, 4, descriptor):
+                    raise SyncError('FILE_PERMISSIONS_UNAVAILABLE')
             os.replace(temp, str(path))
         fsync_dir(path.parent)
     finally:
@@ -673,14 +746,14 @@ def lock(c):
     mkdir_private(c.state_dir)
     path = c.state_dir / "lock"
     safe_chain(path)
-    fd = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    fd = safe_open(path, os.O_CREAT | os.O_RDWR)
     try:
         s = os.fstat(fd)
         if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1:
             raise SyncError("INVALID_LOCK_FILE")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            lock_fd(fd)
+        except (BlockingIOError, PermissionError):
             raise SyncError("SYNC_ALREADY_RUNNING") from None
         yield
     finally:

@@ -618,6 +618,7 @@ class EngineTests(unittest.TestCase):
             with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=b"/usr/local/bin/claude\n/Applications/Cockpit Tools.app/Contents/MacOS/app\n")):
                 s.assert_stopped()
 
+    @unittest.skipIf(os.name == 'nt', 'Windows uses inherited user ACLs, not POSIX mode bits')
     def test_snapshot_files_are_private(self):
         self.put()
         result = self.run_sync()

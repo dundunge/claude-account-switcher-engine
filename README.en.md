@@ -113,9 +113,9 @@ Compatibility currently covers verified Claude Pro environments. Official client
 
 ## Installation, Building & Updating
 
-The complete integration targets **macOS**. Windows source retains compilation checks, but sync and official usage integration are incomplete; no Windows installer is published.
+**Developed and used primarily on macOS. Windows and Linux adapters and package builds are experimental: neither platform has been tested with real accounts or interactive desktop workflows.** Windows has x64 installer/portable packages; Linux has x64 `.deb` / `.AppImage` packages; macOS has an Apple Silicon / Intel universal app. Compilation and synthetic tests do not establish real-world compatibility. See [platform notes](docs/CROSS-PLATFORM.md).
 
-**First use requires a prepared sync configuration, official Claude Code and the Electron authorization component. Building or copying the app alone does not initialize them; there is no general one-click initializer.** See [sync boundaries](docs/LOCAL-SYNC.md) and [authorization setup](docs/MANUAL-USAGE.md).
+**First use requires a prepared sync configuration, official Claude Code and the Electron authorization component.** New installations can preview then explicitly initialize with `tools/prepare_local_sync.py`; existing configurations are never overwritten. Windows queries also need an isolated Python / ConPTY environment. Installing the app alone does not initialize these dependencies. See [platform setup](docs/CROSS-PLATFORM.md), [sync boundaries](docs/LOCAL-SYNC.md) and [authorization setup](docs/MANUAL-USAGE.md).
 
 ### Updating Existing Installations
 If sync is already configured and the release explicitly states that the external engine is unchanged:

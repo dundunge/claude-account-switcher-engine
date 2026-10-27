@@ -1,5 +1,7 @@
 # 多账号额度查询 / Multi-account usage queries
 
+Windows / Linux 的终端、Python / ConPTY、Electron 组件准备与实测边界见 [CROSS-PLATFORM.md](CROSS-PLATFORM.md)。下方 Terminal 与 Application Support 路径示例以 macOS 为准；原生辅助功能面板读取仅适用于 macOS。
+
 ## 默认手动，可选定时刷新
 
 - 主页账号行点击只选中，不触发切号。每个账号最右侧固定显示“切换”按钮，旁边的

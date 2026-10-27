@@ -48,6 +48,10 @@ fn discard_stages(receiver: &Receiver<String>) {
 }
 
 fn checked_file(path: &Path) -> Result<(), String> {
+    checked_file_with_limit(path, 1024 * 1024)
+}
+
+fn checked_file_with_limit(path: &Path, max_bytes: u64) -> Result<(), String> {
     if !path.is_absolute() {
         return Err(crate::locale::tr(
             "同步文件路径必须为绝对路径",
@@ -62,7 +66,7 @@ fn checked_file(path: &Path) -> Result<(), String> {
                 "A sync file or directory is missing.",
             )
         })?;
-        if meta.file_type().is_symlink() {
+        if crate::platform::runtime::is_redirected(&meta) {
             return Err(crate::locale::tr(
                 "同步文件路径含符号链接，已停止打开账号",
                 "A sync path contains a symlink. Account launch stopped.",
@@ -72,7 +76,7 @@ fn checked_file(path: &Path) -> Result<(), String> {
     }
     let meta = std::fs::metadata(path)
         .map_err(|_| crate::locale::tr("无法读取同步文件", "Could not read a sync file."))?;
-    if !meta.is_file() || meta.len() > 1024 * 1024 {
+    if !meta.is_file() || meta.len() > max_bytes {
         return Err(
             crate::locale::tr("同步文件类型或大小无效", "Invalid sync file type or size.").into(),
         );
@@ -93,12 +97,7 @@ fn checked_file(path: &Path) -> Result<(), String> {
 }
 
 fn config_path() -> Result<PathBuf, String> {
-    Ok(dirs::home_dir()
-        .ok_or(crate::locale::tr(
-            "无法确定用户目录",
-            "Could not determine the home directory.",
-        ))?
-        .join("Library/Application Support/ClaudeSessionSync/CASE/hook.json"))
+    Ok(crate::platform::app_data().join("ClaudeSessionSync/CASE/hook.json"))
 }
 
 /// As `before_launch`, with progress callbacks for the launcher UI.  The
@@ -141,7 +140,14 @@ pub fn rebuild_session(
                 "同步配置缺少文件路径",
                 "A file path is missing from the sync configuration.",
             ))?;
-        checked_file(&path)?;
+        checked_file_with_limit(
+            &path,
+            if key == "python_path" {
+                100 * 1024 * 1024
+            } else {
+                1024 * 1024
+            },
+        )?;
         Ok(path)
     };
     let python = file("python_path")?;
@@ -260,7 +266,14 @@ fn before_launch_with_config_stage<F: FnMut(&str)>(
                 "同步配置缺少文件路径",
                 "A file path is missing from the sync configuration.",
             ))?;
-        checked_file(&path)?;
+        checked_file_with_limit(
+            &path,
+            if key == "python_path" {
+                100 * 1024 * 1024
+            } else {
+                1024 * 1024
+            },
+        )?;
         Ok(path)
     };
     let python = file("python_path")?;
