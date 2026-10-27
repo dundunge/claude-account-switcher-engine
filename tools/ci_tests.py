@@ -23,6 +23,10 @@ for command in checks:
     print(text, flush=True)
     if result.returncode:
         if os.environ.get('GITHUB_ACTIONS'):
-            detail = text[-3500:].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
-            print('::error title=Offline verification failed::' + detail, flush=True)
+            # An annotation has a small size limit. Keep both the first failure
+            # and final summary, with enough separate annotations for tracebacks.
+            detail = text if len(text) <= 24000 else text[:12000] + '\n[output truncated]\n' + text[-12000:]
+            for index, start in enumerate(range(0, len(detail), 3000), 1):
+                chunk = detail[start:start + 3000].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                print(f'::error title=Offline verification failed {index}::' + chunk, flush=True)
         sys.exit(result.returncode)

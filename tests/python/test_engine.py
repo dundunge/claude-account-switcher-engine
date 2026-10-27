@@ -56,7 +56,7 @@ class EngineTests(unittest.TestCase):
         return self.index / PEERS[peer] / name
 
     def put(self, peer=0, stamp=T0, name=NAME, **fields):
-        d = {"sessionId": name[:-5], "cliSessionId": CLI, "cwd": "/offline/project", "title": "source", "isArchived": False}
+        d = {"sessionId": name[:-5], "cliSessionId": CLI, "cwd": str(self.root / "offline-project"), "title": "source", "isArchived": False}
         d.update(fields)
         self.path(peer, name).write_text(json.dumps(d))
         os.utime(self.path(peer, name), ns=(stamp, stamp))

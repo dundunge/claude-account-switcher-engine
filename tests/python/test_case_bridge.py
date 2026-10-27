@@ -191,7 +191,7 @@ class CaseBridgeTests(unittest.TestCase):
 
     def test_cannot_proceed_when_claude_declines_normal_exit(self):
         with mock.patch.object(s, 'assert_stopped', side_effect=s.SyncError('CLAUDE_MUST_BE_FULLY_CLOSED')):
-            with mock.patch.object(bridge.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+            with mock.patch.object(bridge.subprocess, 'run', return_value=mock.Mock(returncode=0, stdout=b'')):
                 with self.assertRaisesRegex(bridge.BridgeError, 'CLAUDE_STILL_RUNNING'):
                     bridge.graceful_close(s, timeout=0)
 

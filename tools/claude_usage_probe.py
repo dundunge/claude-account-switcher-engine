@@ -839,13 +839,13 @@ class AuthBrowser:
                         if chunk is not None:
                             if not chunk: break
                             received.extend(chunk)
-                            if b'CASE_AUTH_READY\n' in received:
+                            if b'CASE_AUTH_READY\n' in received.replace(b'\r\n', b'\n'):
                                 connection.sendall(b'OK\n')
                                 break
                             if len(received) > 8192: break
                     else:
                         raise ProbeError('AUTH_BROWSER_FAILED')
-                    if b'CASE_AUTH_READY\n' not in received:
+                    if b'CASE_AUTH_READY\n' not in received.replace(b'\r\n', b'\n'):
                         raise ProbeError('AUTH_BROWSER_FAILED')
                 except (OSError, ValueError, ProbeError) as error:
                     self.error = str(error) if isinstance(error, ProbeError) else 'AUTH_BROWSER_FAILED'

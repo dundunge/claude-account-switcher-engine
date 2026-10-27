@@ -292,7 +292,7 @@ time.sleep(60)
         runtime.chmod(0o700)
         helper, opener = base / 'auth-browser.cjs', base / 'browser.command'
         helper.write_text('// synthetic browser')
-        opener.write_text('#!/bin/zsh\nexec /usr/bin/python3 -I ' + shlex.quote(str(SCRIPT)) + ' browser "$@"\n')
+        opener.write_text('#!/bin/sh\nexec /usr/bin/python3 -I ' + shlex.quote(str(SCRIPT)) + ' browser "$@"\n')
         opener.chmod(0o700)
         payload['browser'] = {'binary': str(runtime), 'script': str(helper), 'opener': str(opener),
                               'userData': str(base / 'browser'), 'label': f'Synthetic {index}'}
