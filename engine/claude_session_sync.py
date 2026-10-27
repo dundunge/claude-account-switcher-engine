@@ -40,6 +40,9 @@ SPAWN_PORTABLE = frozenset({
 SPAWN_FLAGS = frozenset({"sideSession", "userFork", "handOff", "btw"})
 MAX_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 10000
+# Windows reports a writable file as 0666; these bits do not represent its
+# DACL. Match the filesystem representation without relaxing equality checks.
+NEW_FILE_MODE = 0o666 if os.name == 'nt' else 0o600
 
 # ``link(temp, destination); unlink(temp)`` is not a transaction: a process
 # exit between the two syscalls leaves a destination with two hard links.  The
@@ -501,7 +504,7 @@ def hierarchy_graph(c, output):
     for peer in c.peers:
         rows = {parse(f.data)["sessionId"]: parse(f.data)
                 for rel, f in output.items()
-                if str(Path(rel).parent) == peer and LOCAL.fullmatch(Path(rel).name)}
+                if Path(rel).parent.as_posix() == peer and LOCAL.fullmatch(Path(rel).name)}
         parents, children = {}, {}
         for sid, row in rows.items():
             h = hierarchy(row) or {}
@@ -625,7 +628,7 @@ def build_plan(c, seed=None):
                 continue
             target = {k: v for k, v in merged.items() if k not in PORTABLE}
             target.update(portable)
-            output[relative] = File(encoded(target), winner.mtime, existing.mode if existing else 0o600)
+            output[relative] = File(encoded(target), winner.mtime, existing.mode if existing else NEW_FILE_MODE)
 
     for name, (_, f) in tombstones.items():
         for peer in c.peers:
@@ -633,13 +636,13 @@ def build_plan(c, seed=None):
             if name in stale_markers:
                 output.pop(relative, None)
             elif relative not in inputs or parse(inputs[relative].data) != parse(f.data):
-                output[relative] = File(f.data, f.mtime, 0o600)
+                output[relative] = File(f.data, f.mtime, NEW_FILE_MODE)
 
     # Update the archive hint together with record changes; the same manifest covers both.
     for peer in c.peers:
         archived = []
         for relative, f in output.items():
-            if str(Path(relative).parent) == peer and LOCAL.fullmatch(Path(relative).name):
+            if Path(relative).parent.as_posix() == peer and LOCAL.fullmatch(Path(relative).name):
                 d = parse(f.data)
                 if d.get("isArchived", False):
                     archived.append(d["sessionId"])
@@ -647,7 +650,7 @@ def build_plan(c, seed=None):
         if archived or rel in inputs:
             data = encoded({"v": 1, "archived": sorted(archived)})
             if rel not in inputs or parse(inputs[rel].data) != parse(data):
-                output[rel] = File(data, max((f.mtime for f in output.values()), default=time.time_ns()), 0o600)
+                output[rel] = File(data, max((f.mtime for f in output.values()), default=time.time_ns()), NEW_FILE_MODE)
 
     hierarchy_links, hierarchy_orphans = hierarchy_graph(c, output)
     ops = []
@@ -743,7 +746,7 @@ def atomic_write(path, f, creating=False):
 
 
 def state_write(path, value):
-    atomic_write(path, File(encoded(value), time.time_ns(), 0o600))
+    atomic_write(path, File(encoded(value), time.time_ns(), NEW_FILE_MODE))
 
 
 @contextlib.contextmanager
@@ -800,7 +803,7 @@ def apply(c, plan, guard=assert_stopped):
             entry = {"path": op.relative, "before": digest(op.before.data) if op.before else None, "after": digest(op.after.data) if op.after else None}
             if op.before:
                 blob = "before-" + str(i) + ".bin"
-                atomic_write(directory / blob, File(op.before.data, op.before.mtime, 0o600), creating=True)
+                atomic_write(directory / blob, File(op.before.data, op.before.mtime, NEW_FILE_MODE), creating=True)
                 entry.update(blob=blob, mtime=op.before.mtime, mode=op.before.mode)
             manifest["operations"].append(entry)
         manifest_path = directory / "manifest.json"
@@ -866,7 +869,7 @@ def rebuild(c, relative, entry, guard=assert_stopped):
         mtime = time.time_ns()
     # Health timestamps are milliseconds; regular index mtimes are nanoseconds.
     stamp = mtime * 1_000_000 if mtime < 10**15 else mtime
-    plan = build_plan(c, (relative, File(data, stamp, 0o600)))
+    plan = build_plan(c, (relative, File(data, stamp, NEW_FILE_MODE)))
     if not plan.operations:
         raise SyncError("SESSION_MARKED_DELETED")
     return apply(c, plan, guard=guard)
