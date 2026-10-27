@@ -2,8 +2,12 @@
 """Run offline gates; annotate failures so public CI diagnostics are accessible."""
 import glob
 import os
+import re
 import subprocess
 import sys
+
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+os.environ['CARGO_TERM_COLOR'] = 'never'
 
 checks = [
     ['cargo', 'fmt', '--check'],
@@ -15,7 +19,7 @@ checks = [
 for command in checks:
     print(' '.join(command), flush=True)
     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    text = result.stdout.decode('utf-8', errors='replace')
+    text = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout.decode('utf-8', errors='replace'))
     print(text, flush=True)
     if result.returncode:
         if os.environ.get('GITHUB_ACTIONS'):

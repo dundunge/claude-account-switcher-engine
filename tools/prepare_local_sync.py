@@ -16,11 +16,16 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def prepare(apply=False):
+def load_engine():
     spec = importlib.util.spec_from_file_location('case_prepare_engine', ROOT / 'engine/claude_session_sync.py')
     engine = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = engine
     spec.loader.exec_module(engine)
+    return engine
+
+
+def prepare(apply=False):
+    engine = load_engine()
     if sys.platform == 'darwin': support = Path.home() / 'Library/Application Support'
     elif os.name == 'nt': support = Path(os.environ['APPDATA'])
     elif sys.platform == 'linux': support = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
