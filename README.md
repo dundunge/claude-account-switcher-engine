@@ -6,6 +6,27 @@
 
 本项目为**个人独立维护分支**：代码、更新检查与版本发布均固定指向 **[dundunge/claude-account-switcher-engine](https://github.com/dundunge/claude-account-switcher-engine)**，不会自动合并上游代码。
 
+## 更新记录
+
+每次功能、修复或文档更新均按 `YYYY-MM-DD` 标注日期，按日期倒序记录；同一天的更新补充到对应日期下。
+
+### 2026-10-28
+
+- 修复 macOS 同步检测对 Claude 更新器 `ShipIt` 的误判，避免更新器反复重启时中断会话索引同步；Claude 主程序和会话 Helper 仍会阻止索引写入。
+- 新增旧安装专用补丁工具 [`tools/patch_macos_shipit.py`](tools/patch_macos_shipit.py)：支持外部 0.3.0 / 0.4.0 引擎，先预览，再显式应用；备份引擎与 hook 并同步更新 hash。已有未完成事务仍须审核快照后恢复，见[操作说明](docs/LOCAL-SYNC.md#existing-macos-installations-apply-the-shipit-fix)。
+- 补充 macOS 应用备份的 `.noindex` 命名建议，避免旧备份混入 Spotlight 应用搜索。
+- [macOS、Windows、Linux 离线 CI 全部通过](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40664600823)，覆盖更新器重启、实际客户端拦截、同步恢复与补丁安装失败回滚。
+
+### 2026-10-26
+
+- 补充 Windows / Linux 实验适配及安装包构建；4.3.1 修复 macOS 通用包的 `lipo` 参数顺序，适配边界见[跨平台说明](docs/CROSS-PLATFORM.md)。
+- 增加默认关闭的可选定时额度刷新、自定义分钟 / 小时间隔与到期状态，见[定时刷新说明](docs/SCHEDULED-USAGE.md)。
+
+### 2026-10-25
+
+- 完善独立官方 CLI 手动额度查询、账号行选择、单号 / 全部刷新和已授权账号 CLI 入口。
+- 修复面板锁状态、后台活动解析与跨窗口批量统计，保留[独立审计及待复核范围](docs/AUDIT-FOLLOWUP-20261025.md)。
+
 ---
 
 ### 做这个工具的初衷
@@ -102,7 +123,8 @@ CASE 从架构设计上就明确排除了反向代理、API 网关中转或请�
 
 离线测试、安装版检查和独立审计分别记录：
 
-- **跨平台离线验证（4.3.0）**：macOS、Windows Server 2022、Ubuntu 22.04 的格式检查、Clippy、Rust、Node 和适用的 Python 测试均通过，见 [GitHub Actions 记录](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40446264865)。Windows 的 ConPTY、命名管道与授权 IPC 使用模拟程序验证；Windows/Linux 尚未完成真实账号、安装交互和 Desktop 切号实测。
+- **ShipIt 同步修复离线验证（2026-10-28）**：macOS、Windows Server 2022、Ubuntu 22.04 的完整离线检查均通过，见 [GitHub Actions 记录](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40664600823)。覆盖更新器重启不打断同步、真实 Desktop 进程仍被拦截、快照恢复及补丁安装失败回滚；模拟测试不代表真实账号切号验收。
+- **跨平台离线验证（2026-10-26，4.3.0）**：macOS、Windows Server 2022、Ubuntu 22.04 的格式检查、Clippy、Rust、Node 和适用的 Python 测试均通过，见 [GitHub Actions 记录](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40446264865)。Windows 的 ConPTY、命名管道与授权 IPC 使用模拟程序验证；Windows/Linux 尚未完成真实账号、安装交互和 Desktop 切号实测。
 - **定时刷新版本离线验证（2026-10-26）**：**237 项测试通过**（Python 120、Rust 单元 76 + bridge 3、Node 38），Clippy 通过。新增测试使用模拟环境；模拟网页版验证界面操作，不运行真实定时 worker。该版本已在本机替换应用并检查设置入口，尚未完成真实账号的定时到期查询验收。
 - **Grok 审计与修复跟踪（2026-10-25）**：Grok 对此前审计包核对 77 项文件哈希，重跑 15 项 Node 测试；没有重跑全部测试或验证真实账号。实现者已修复面板锁状态、后台活动解析和跨窗口批量统计三项问题，**修复仍待独立复核**，见[审计跟进记录](docs/AUDIT-FOLLOWUP-20261025.md)。
 - **此前安装版验收（`103dd9f`，2026-10-25）**：该批次完成 214 项验证；三个独立授权 Pro 账号的手动查询成功，显示两档使用量和重置时间，核对了账号行选择、单号／全部刷新及独立 CLI 入口。没有执行真实 Desktop 切号，也不代表后续审计修复或定时刷新已经完成真实账号验收。
@@ -120,9 +142,25 @@ CASE 从架构设计上就明确排除了反向代理、API 网关中转或请�
 ### 日常更新覆盖
 如果已配置同步环境，且该次发布明确同步引擎未变：
 
-1. 备份旧应用与外部引擎、bridge、hook；
+1. 备份旧应用与外部引擎、bridge、hook。macOS 上将应用备份命名为 `CASE.app.noindex`，或放入以 `.noindex` 结尾的目录，避免旧版本混入 Spotlight 应用搜索；需要恢复时移除该后缀或移出该目录；
 2. 正常退出 CASE，将本次构建或发布的应用替换到 `~/Applications/CASE.app`；
 3. 保留账号配置、`ClaudeSessionSync` 和各账号登录目录；不要重复运行首次迁移工具，也不要为了更新 CASE 强行结束 Claude。
+
+### macOS 既有安装：ShipIt 同步修复（2026-10-28）
+
+仅替换 `CASE.app` 不会更新 hook 绑定的外部同步引擎。在 macOS 的 Terminal / zsh 中进入本仓库根目录，先预览：
+
+```zsh
+python3 tools/patch_macos_shipit.py
+```
+
+完成 Claude 当前任务并正常退出后，再显式应用：
+
+```zsh
+python3 tools/patch_macos_shipit.py --apply
+```
+
+已有补丁返回 `unchanged`；异常 hash、非预期路径或并发同步会阻止写入。工具不自动回滚索引或清除 `RECOVERY_REQUIRED`，已有中断事务须按[本地同步说明](docs/LOCAL-SYNC.md#existing-macos-installations-apply-the-shipit-fix)单独预演和恢复。
 
 👉 [访问 GitHub 自有 Releases 页面](https://github.com/dundunge/claude-account-switcher-engine/releases)
 
@@ -160,6 +198,7 @@ node --test tests/*.test.cjs
 
 - `engine/claude_session_sync.py`：0.4.0 版本的核心索引同步、快照备份与事故恢复引擎。已有外部 0.3.0 同步环境不会随应用替换自动升级，升级边界见[跨平台说明](docs/CROSS-PLATFORM.md)。
 - `tools/case_sync_bridge.py`：负责与 CASE 交互、检查 Profile 分区健康度并安全执行串行切换。
+- `tools/patch_macos_shipit.py`：为已有 macOS 同步环境应用 ShipIt 检测补丁，保留引擎版本与 bridge，备份引擎和 hook 并更新 hash；默认仅预览。
 - `tools/migrate_cockpit_to_case.py`：**已有 Cockpit 同步配置的首次迁移工具**，需要先准备经过审核的 `ClaudeSessionSync/config.json`。默认仅预览；`--apply` 才会写入，拒绝覆盖已有 CASE 或账号目录。已迁移用户**不要重复运行**。
 
 > ⚠️ **关于首次同步的特别提醒：**

@@ -6,6 +6,27 @@ Based on [CASE by Patryk Starostka](https://github.com/pstarostka/claude-account
 
 This repository is maintained independently: source code, in-app update checks, and releases exclusively point to **[dundunge/claude-account-switcher-engine](https://github.com/dundunge/claude-account-switcher-engine)**. Upstream code is never merged automatically.
 
+## Update History
+
+Date every feature, fix or documentation update using `YYYY-MM-DD`, newest first. Append changes made on the same day under that date.
+
+### 2026-10-28
+
+- Fixed macOS sync detection incorrectly treating Claude's `ShipIt` updater as an active Desktop client. Repeated updater restarts no longer interrupt index sync; Claude Desktop and its session helpers still block index writes.
+- Added [`tools/patch_macos_shipit.py`](tools/patch_macos_shipit.py) for existing external 0.3.0 / 0.4.0 engines: preview first, apply explicitly, back up the engine and hook, and update the hash pin together. Unfinished transactions still require snapshot review and recovery; see the [instructions](docs/LOCAL-SYNC.md#existing-macos-installations-apply-the-shipit-fix).
+- Documented `.noindex` naming for macOS app backups so old copies do not appear in Spotlight application search.
+- [macOS, Windows and Linux offline CI passed](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40664600823), covering updater restarts, active-client blocking, sync recovery and installer rollback after failure.
+
+### 2026-10-26
+
+- Added experimental Windows / Linux adapters and package builds. Version 4.3.1 fixed the macOS universal package's `lipo` argument order; see [platform scope](docs/CROSS-PLATFORM.md).
+- Added optional quota refresh scheduling, disabled by default, with custom minute / hour intervals and deadline status. See [scheduled refresh](docs/SCHEDULED-USAGE.md).
+
+### 2026-10-25
+
+- Improved isolated official CLI quota queries, account-row selection, single / bulk refresh and authorized account CLI entry points.
+- Fixed panel-lock status, background-activity parsing and multi-window batch counts, retaining the [independent audit and pending review scope](docs/AUDIT-FOLLOWUP-20261025.md).
+
 ---
 
 ### Why We Built This
@@ -103,7 +124,8 @@ Local state polling and time-label repainting do not request quota.
 
 Offline tests, installed-app checks and independent audits have separate scopes:
 
-- **Cross-Platform Offline Verification (4.3.0)**: Formatting, Clippy, Rust, Node and applicable Python tests passed on macOS, Windows Server 2022 and Ubuntu 22.04; see the [GitHub Actions record](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40446264865). Windows ConPTY, named pipes and authorization IPC use synthetic programs. Windows/Linux have not been tested with real accounts, installer interaction or Desktop switching.
+- **ShipIt Sync Fix Offline Verification (2026-10-28)**: Full offline checks passed on macOS, Windows Server 2022 and Ubuntu 22.04; see the [GitHub Actions record](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40664600823). Covers updater restarts, active Desktop blocking, snapshot recovery and installer rollback after failure. Synthetic tests do not establish real-account switching acceptance.
+- **Cross-Platform Offline Verification (2026-10-26, 4.3.0)**: Formatting, Clippy, Rust, Node and applicable Python tests passed on macOS, Windows Server 2022 and Ubuntu 22.04; see the [GitHub Actions record](https://github.com/dundunge/claude-account-switcher-engine/actions/runs/40446264865). Windows ConPTY, named pipes and authorization IPC use synthetic programs. Windows/Linux have not been tested with real accounts, installer interaction or Desktop switching.
 - **Scheduled Refresh Offline Verification (2026-10-26)**: **237 tests passed** (Python 120, Rust unit 76 + bridge 3, Node 38), plus Clippy. New tests use mocks. The browser demo checks interface behavior without a real scheduling worker. This version has been installed locally and its Settings entry checked; real-account queries at scheduled deadlines have not been verified.
 - **Grok Audit and Fix Tracking (2026-10-25)**: Grok checked 77 file hashes and reran 15 Node tests against the preceding audit package, without rerunning the complete suite or verifying real accounts. The implementer fixed the panel-lock status, background-activity parsing and multi-window batch-count issues. **Independent re-review is pending**; see the [audit follow-up](docs/AUDIT-FOLLOWUP-20261025.md).
 - **Preceding Installed-App Acceptance (`103dd9f`, 2026-10-25)**: That batch passed 214 checks. Manual queries succeeded for three independently authorized Pro accounts, showing both used percentages and reset times; row selection, single/bulk refresh and independent CLI entry points were checked. No real Desktop switch was executed. This does not establish real-account acceptance for later audit fixes or scheduled refresh.
@@ -121,9 +143,25 @@ Compatibility currently covers verified Claude Pro environments. Official client
 ### Updating Existing Installations
 If sync is already configured and the release explicitly states that the external engine is unchanged:
 
-1. Back up the old app, external engine, bridge and hook.
+1. Back up the old app, external engine, bridge and hook. On macOS, name app backups `CASE.app.noindex` or keep them in a directory ending in `.noindex` so Spotlight does not list old versions as apps; remove the suffix or move the app out of that directory when restoring it.
 2. Quit CASE normally and replace `~/Applications/CASE.app` with the new build or release.
 3. Preserve account settings, `ClaudeSessionSync` and all account login directories. Do not rerun initial migration or force-quit Claude to update CASE.
+
+### Existing macOS Installations: ShipIt Sync Fix (2026-10-28)
+
+Replacing `CASE.app` alone does not update the external engine pinned by the hook. From macOS Terminal / zsh at the repository root, preview first:
+
+```zsh
+python3 tools/patch_macos_shipit.py
+```
+
+Finish the active Claude task and quit Claude normally before explicitly applying:
+
+```zsh
+python3 tools/patch_macos_shipit.py --apply
+```
+
+An already patched installation returns `unchanged`. Unexpected hashes, unsafe paths or concurrent sync operations block writes. The tool does not automatically roll back indexes or clear `RECOVERY_REQUIRED`; preview and recover existing interrupted transactions separately using the [local sync instructions](docs/LOCAL-SYNC.md#existing-macos-installations-apply-the-shipit-fix).
 
 👉 [Browse Releases on GitHub](https://github.com/dundunge/claude-account-switcher-engine/releases)
 
@@ -161,6 +199,7 @@ Sync scripts and automated test suites are included in the repository:
 
 - `engine/claude_session_sync.py`: Version 0.4.0 index merger, snapshot creator, and rollback engine. Existing external 0.3.0 sync environments are not upgraded by replacing the application; see [platform notes](docs/CROSS-PLATFORM.md).
 - `tools/case_sync_bridge.py`: Manages profile health checks and safely orchestrates sequential transitions.
+- `tools/patch_macos_shipit.py`: Applies the ShipIt detection fix to existing macOS sync environments, preserving the engine version and bridge, backing up the engine and hook, and updating the hash pin. Preview only by default.
 - `tools/migrate_cockpit_to_case.py`: **Initial migration for an existing Cockpit sync configuration**, requiring a reviewed `ClaudeSessionSync/config.json`. Previews by default; `--apply` writes changes and refuses to overwrite an existing CASE installation or account directory. Previously migrated users **must not rerun it**.
 
 > ⚠️ **First-Time Sync Prerequisite:**
