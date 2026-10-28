@@ -609,6 +609,77 @@ class EngineTests(unittest.TestCase):
             with self.assertRaisesRegex(s.SyncError, "SYNC_ALREADY_RUNNING"):
                 self.run_sync()
 
+    def test_process_guard_excludes_only_the_squirrel_updater(self):
+        updater = b"/Applications/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt\n"
+        with mock.patch.object(s.sys, "platform", "darwin"):
+            with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=updater)):
+                s.assert_stopped()
+            for command in [
+                b"/Applications/Claude.app/Contents/MacOS/ShipIt\n",
+                b"/Applications/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt Helper\n",
+            ]:
+                with self.subTest(command=command):
+                    with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=command)):
+                        with self.assertRaisesRegex(s.SyncError, "CLAUDE_MUST_BE_FULLY_CLOSED"):
+                            s.assert_stopped()
+
+    def test_updater_does_not_hide_a_running_desktop_or_helper(self):
+        updater = b"/Applications/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt\n"
+        with mock.patch.object(s.sys, "platform", "darwin"):
+            for command in [
+                b"/Applications/Claude.app/Contents/MacOS/Claude\n",
+                b"/Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)\n",
+                b"Claude Helper (GPU)\n",
+            ]:
+                with self.subTest(command=command):
+                    with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=updater + command)):
+                        with self.assertRaisesRegex(s.SyncError, "CLAUDE_MUST_BE_FULLY_CLOSED"):
+                            s.assert_stopped()
+
+    def test_restarting_updater_allows_sync_and_snapshot_restore(self):
+        self.put(isArchived=True)
+        before = self.tree()
+        updater = b"/Applications/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt\n"
+        calls = 0
+
+        def processes(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return mock.Mock(stdout=updater if calls % 2 else b"")
+
+        with mock.patch.object(s.sys, "platform", "darwin"):
+            with mock.patch.object(s.subprocess, "run", side_effect=processes):
+                result = s.apply(self.c, s.build_plan(self.c), guard=s.assert_stopped)
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(s.unfinished(self.c), [])
+                self.assertEqual(s.build_plan(self.c).operations, [])
+                restored = s.restore(self.c, result["snapshot"], guard=s.assert_stopped)
+        self.assertEqual(restored["status"], "rolled_back")
+        self.assertEqual(self.tree(), before)
+        self.assertGreater(calls, 4)
+
+    def test_desktop_start_during_sync_still_requires_recovery_with_updater(self):
+        self.put(isArchived=True)
+        before = self.tree()
+        updater = b"/Applications/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt\n"
+        calls = 0
+
+        def processes(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            desktop = b"Claude Helper (Renderer)\n" if calls >= 4 else b""
+            return mock.Mock(stdout=updater + desktop)
+
+        with mock.patch.object(s.sys, "platform", "darwin"):
+            with mock.patch.object(s.subprocess, "run", side_effect=processes):
+                with self.assertRaisesRegex(s.SyncError, "CLAUDE_MUST_BE_FULLY_CLOSED") as error:
+                    s.apply(self.c, s.build_plan(self.c), guard=s.assert_stopped)
+            self.assertEqual(s.unfinished(self.c), [error.exception.snapshot])
+            with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=updater)):
+                s.restore(self.c, error.exception.snapshot, guard=s.assert_stopped)
+        self.assertEqual(s.unfinished(self.c), [])
+        self.assertEqual(self.tree(), before)
+
     def test_process_guard_matches_desktop_helpers_but_not_code_cli(self):
         with mock.patch.object(s.sys, "platform", "darwin"):
             for command in [b"/Applications/Claude.app/Contents/MacOS/Claude\n", b"Claude Helper (Renderer)\n"]:

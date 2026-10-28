@@ -681,6 +681,11 @@ def assert_stopped():
     except (OSError, subprocess.SubprocessError):
         raise SyncError("PROCESS_STATE_UNKNOWN") from None
     for command in p.stdout.decode(errors="replace").splitlines():
+        # Squirrel's updater does not host a Desktop profile. A failed update
+        # can keep restarting it after Claude exits, so recognize only this
+        # exact helper path. Every other process in the bundle still blocks.
+        if sys.platform == 'darwin' and command.strip().endswith("/Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt"):
+            continue
         name = Path(command.strip()).name
         desktop = ("claude.app/contents/" in command.lower() or re.fullmatch(r"Claude(?: Helper(?: \([^)]*\))?)?", name)) if sys.platform == 'darwin' else re.fullmatch(r"claude(?:-desktop|[- ]helper(?: \([^)]*\))?)?(?:\.exe)?", name, re.I)
         if desktop:

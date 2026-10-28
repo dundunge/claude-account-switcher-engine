@@ -39,6 +39,39 @@ Do not use two account managers against the same profiles concurrently. Do not s
 account-scoped index. Use the engine's CLI help and review its plan before any recovery or apply.
 An unfinished journal must be reviewed and recovered before another write.
 
+On macOS, the index-sync process guard excludes the exact Squirrel updater path
+`Claude.app/Contents/Frameworks/Squirrel.framework/Resources/ShipIt`. That helper updates
+the application bundle and may restart after Desktop exits. Claude Desktop and its session
+helpers still block index writes, including when the updater is running beside them.
+
+### Existing macOS installations: apply the ShipIt fix
+
+The application uses the external engine pinned by `hook.json`. Updating `CASE.app` alone
+does not update that engine. From a terminal at the repository root, preview the targeted fix:
+
+```sh
+python3 tools/patch_macos_shipit.py
+```
+
+Finish any active Claude task and quit Claude normally before applying it:
+
+```sh
+python3 tools/patch_macos_shipit.py --apply
+```
+
+The tool supports existing 0.3.0 and 0.4.0 engines, preserves their version and bridge,
+backs up the original engine and hook, then updates the engine and its SHA-256 pin together.
+It refuses an unexpected hash, customized guard, unsafe path or overlapping sync operation.
+An already patched installation returns `unchanged` without writes. The reported backup
+directory contains `engine-before.py` and `hook-before.json`; restore these together if a
+program rollback is needed, with CASE and Claude closed.
+
+This code update does not recover or clear unfinished transactions. If the preview reports
+`unfinished_transactions` above zero, review the corresponding snapshot and matching runtime
+config under `state/` before using the pinned engine's `restore` command. Preview recovery
+first; only explicitly apply it after reviewing the changes. Recovery conflicts stop rather
+than overwrite newer session edits. No automatic index rollback or account launch is performed.
+
 ## Updating an existing installation
 
 Back up CASE.app and the external engine, bridge and hook before changing them. Check the hook's
