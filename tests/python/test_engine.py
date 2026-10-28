@@ -636,6 +636,13 @@ class EngineTests(unittest.TestCase):
                         with self.assertRaisesRegex(s.SyncError, "CLAUDE_MUST_BE_FULLY_CLOSED"):
                             s.assert_stopped()
 
+    @staticmethod
+    def macos_process_guard():
+        # Keep filesystem operations on the host ABI while simulating only
+        # macOS process detection (Linux uses a different atomic rename).
+        with mock.patch.object(s.sys, "platform", "darwin"):
+            s.assert_stopped()
+
     def test_restarting_updater_allows_sync_and_snapshot_restore(self):
         self.put(isArchived=True)
         before = self.tree()
@@ -647,13 +654,12 @@ class EngineTests(unittest.TestCase):
             calls += 1
             return mock.Mock(stdout=updater if calls % 2 else b"")
 
-        with mock.patch.object(s.sys, "platform", "darwin"):
-            with mock.patch.object(s.subprocess, "run", side_effect=processes):
-                result = s.apply(self.c, s.build_plan(self.c), guard=s.assert_stopped)
-                self.assertEqual(result["status"], "completed")
-                self.assertEqual(s.unfinished(self.c), [])
-                self.assertEqual(s.build_plan(self.c).operations, [])
-                restored = s.restore(self.c, result["snapshot"], guard=s.assert_stopped)
+        with mock.patch.object(s.subprocess, "run", side_effect=processes):
+            result = s.apply(self.c, s.build_plan(self.c), guard=self.macos_process_guard)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(s.unfinished(self.c), [])
+            self.assertEqual(s.build_plan(self.c).operations, [])
+            restored = s.restore(self.c, result["snapshot"], guard=self.macos_process_guard)
         self.assertEqual(restored["status"], "rolled_back")
         self.assertEqual(self.tree(), before)
         self.assertGreater(calls, 4)
@@ -670,13 +676,12 @@ class EngineTests(unittest.TestCase):
             desktop = b"Claude Helper (Renderer)\n" if calls >= 4 else b""
             return mock.Mock(stdout=updater + desktop)
 
-        with mock.patch.object(s.sys, "platform", "darwin"):
-            with mock.patch.object(s.subprocess, "run", side_effect=processes):
-                with self.assertRaisesRegex(s.SyncError, "CLAUDE_MUST_BE_FULLY_CLOSED") as error:
-                    s.apply(self.c, s.build_plan(self.c), guard=s.assert_stopped)
-            self.assertEqual(s.unfinished(self.c), [error.exception.snapshot])
-            with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=updater)):
-                s.restore(self.c, error.exception.snapshot, guard=s.assert_stopped)
+        with mock.patch.object(s.subprocess, "run", side_effect=processes):
+            with self.assertRaisesRegex(s.SyncError, "CLAUDE_MUST_BE_FULLY_CLOSED") as error:
+                s.apply(self.c, s.build_plan(self.c), guard=self.macos_process_guard)
+        self.assertEqual(s.unfinished(self.c), [error.exception.snapshot])
+        with mock.patch.object(s.subprocess, "run", return_value=mock.Mock(stdout=updater)):
+            s.restore(self.c, error.exception.snapshot, guard=self.macos_process_guard)
         self.assertEqual(s.unfinished(self.c), [])
         self.assertEqual(self.tree(), before)
 
