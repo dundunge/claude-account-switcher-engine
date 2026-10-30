@@ -28,6 +28,7 @@ let rowsEl = null
 let rowEls = []
 let launching = false
 let activeLaunchId = null
+let syncing = false
 let rerenderEditor = null
 const quota = createQuotaController({ getAccounts: () => S.accounts, onChange: paintQuota })
 const quotaRequests = quota.requests
@@ -66,6 +67,7 @@ function renderBar () {
     ? h('button', { type: 'button', class: 'btn quiet back', onclick: back }, icon('back', 16, 2), tr("账号", "Accounts"))
     : '')
   $tools.replaceChildren(
+    S.view === 'list' ? h('button', { type: 'button', class: 'btn quiet', disabled: syncing || launching || quota.busy || !S.accounts.length, onclick: syncSessions, title: tr('正常退出 Claude 后同步所有账号的会话索引', 'Quit Claude normally, then sync every account session index') }, icon('refresh', 15), syncing ? tr('同步中…', 'Syncing…') : tr('同步会话', 'Sync sessions')) : '',
     S.view === 'list' ? h('button', { type: 'button', class: 'btn quiet', disabled: quota.busy || !S.accounts.length, onclick: () => quota.refreshAll(), title: tr('直接刷新全部账号的额度', 'Refresh usage for every account') }, icon('refresh', 15), quota.refreshingAll ? tr('刷新中…', 'Refreshing…') : tr('刷新全部', 'Refresh all')) : '',
     healthChip(),
     h('button', { type: 'button', class: 'icon-btn', 'aria-label': tr("设置", "Settings"), title: tf("设置 ({0})", "Settings ({0})", combo(',')), onclick: () => api.openSettings() }, icon('sliders', 17))
@@ -194,7 +196,7 @@ function emptyState () {
 }
 
 async function launch (a) {
-  if (launching) return toast(tr("正在切换账号，请稍候。", "An account switch is in progress. Please wait."))
+  if (launching || syncing) return toast(tr("正在执行会话操作，请稍候。", "A session operation is already in progress. Please wait."))
   launching = true
   activeLaunchId = a.id
   if (S.view === 'list') renderRows()
@@ -215,6 +217,28 @@ async function launch (a) {
   }
 }
 
+async function syncSessions () {
+  if (syncing || launching) return toast(tr("正在执行会话操作，请稍候。", "A session operation is already in progress. Please wait."))
+  syncing = true
+  renderBar()
+  toast(tr("等待 Claude 退出…", "Waiting for Claude to quit…"))
+  try {
+    const res = await api.syncSessions()
+    if (res?.error) return toast(res.error, 'error')
+    if (res?.ok !== true) return toast(tr("会话同步未完成，请检查同步状态。", "Session sync did not complete. Review session health."), 'error')
+    const operations = Number.isFinite(res.operations) ? res.operations : 0
+    toast(operations
+      ? tf("会话同步完成：{0} 项索引变更。", "Session sync complete: {0} index changes.", operations)
+      : tr("会话已是最新。", "Sessions are already up to date."))
+    await refresh()
+  } catch (e) {
+    toast(tr("会话同步失败，请检查同步状态。", "Session sync failed. Review session health."), 'error')
+  } finally {
+    syncing = false
+    if (S.view === 'list') renderBar()
+  }
+}
+
 const launchStageText = stage => ({
   waiting_exit: tr('等待 Claude 退出…', 'Waiting for Claude to quit…'),
   validate: tr('校验同步范围…', 'Validating the sync scope…'),
@@ -223,6 +247,14 @@ const launchStageText = stage => ({
   completed: tr('已完成', 'Completed'),
   error: tr('操作被阻止，保留可恢复状态。', 'Operation blocked; the recoverable state was kept.')
 }[stage] || tr('正在处理…', 'Working…'))
+
+const syncStageText = stage => ({
+  waiting_exit: tr('等待 Claude 退出…', 'Waiting for Claude to quit…'),
+  validate: tr('校验同步范围…', 'Validating the sync scope…'),
+  sync: tr('同步会话索引…', 'Syncing session indexes…'),
+  completed: tr('会话同步已完成', 'Session sync complete'),
+  error: tr('会话同步被阻止，保留可恢复状态。', 'Session sync was blocked; recoverable state was kept.')
+}[stage] || tr('正在同步会话…', 'Syncing sessions…'))
 
 async function quit (a) {
   const res = await api.quitAccount(a.id)
@@ -765,6 +797,9 @@ document.addEventListener('keydown', e => {
 api.onAccountsChanged(() => refresh())
 api.onLaunchStage(({ id, stage }) => {
   if (launching && id === activeLaunchId) toast(launchStageText(stage), stage === 'error' ? 'error' : 'info')
+})
+api.onSyncStage(({ stage }) => {
+  if (syncing) toast(syncStageText(stage), stage === 'error' ? 'error' : 'info')
 })
 api.onHealthUpdate(d => { setHealth(d); if (S.view === 'health') viewHealth() })
 api.onShowHealth(() => show('health'))

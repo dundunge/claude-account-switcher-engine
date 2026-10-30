@@ -110,6 +110,27 @@ pub fn before_launch_with_stage<F: FnMut(&str)>(
     before_launch_with_config_stage(target, &config, &mut on_stage)
 }
 
+/// Run the configured index sync without launching another Claude profile.
+///
+/// The bridge still requests a normal Claude quit before writing indexes. This
+/// keeps an explicit sync subject to the same process guard and transaction
+/// rules as an account switch, while leaving the user in control of which
+/// profile (if any) they open next.
+pub fn sync_now_with_stage<F: FnMut(&str)>(
+    target: &Path,
+    mut on_stage: F,
+) -> Result<Value, String> {
+    let config = config_path()?;
+    match run_bridge_with_config_stage(target, &config, &mut on_stage)? {
+        Some(result) => Ok(result),
+        None => Err(crate::locale::tr(
+            "同步配置未启用，无法主动同步会话。",
+            "Sync is not enabled, so sessions cannot be synced manually.",
+        )
+        .into()),
+    }
+}
+
 /// Run a health repair through the same Python engine transaction used before a
 /// launch.  The caller already holds the shared CASE operation lock and must not
 /// ask Claude to quit on the user's behalf; the engine's stopped-process guard
@@ -242,13 +263,37 @@ fn before_launch_with_config_stage<F: FnMut(&str)>(
     config: &Path,
     on_stage: &mut F,
 ) -> Result<Outcome, String> {
+    let Some(result) = run_bridge_with_config_stage(target, config, on_stage)? else {
+        return Ok(Outcome::default());
+    };
+    let bootstrap = result
+        .get("bootstrap")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            crate::locale::tr(
+                "同步结果无效，目标账号没有打开。",
+                "Invalid sync result. The target account was not opened.",
+            )
+            .to_owned()
+        })?;
+    Ok(Outcome { bootstrap })
+}
+
+/// Invoke the reviewed Python bridge and return its final JSON result. `None`
+/// means the installation explicitly disabled the hook, which is a valid
+/// no-op for account launching but an error for a manual sync request.
+fn run_bridge_with_config_stage<F: FnMut(&str)>(
+    target: &Path,
+    config: &Path,
+    on_stage: &mut F,
+) -> Result<Option<Value>, String> {
     checked_file(config)?;
     let value: Value = serde_json::from_slice(&std::fs::read(config).map_err(|_| {
         crate::locale::tr("无法读取同步配置", "Could not read the sync configuration.")
     })?)
     .map_err(|_| crate::locale::tr("同步配置无效", "Invalid sync configuration."))?;
     if value.get("hook_enabled") == Some(&Value::Bool(false)) {
-        return Ok(Outcome::default());
+        return Ok(None);
     }
     if value.get("hook_enabled") != Some(&Value::Bool(true)) {
         return Err(crate::locale::tr(
@@ -315,17 +360,14 @@ fn before_launch_with_config_stage<F: FnMut(&str)>(
                         result.get("status").and_then(Value::as_str),
                         Some("completed" | "unchanged")
                     );
-                    let bootstrap = result.get("bootstrap").and_then(Value::as_bool);
-                    if !valid || bootstrap.is_none() {
+                    if !valid {
                         return Err(crate::locale::tr(
-                            "同步结果无效，目标账号没有打开。",
-                            "Invalid sync result. The target account was not opened.",
+                            "同步结果无效；请检查同步状态后重试",
+                            "Invalid sync result. Review the sync state before trying again.",
                         )
                         .into());
                     }
-                    return Ok(Outcome {
-                        bootstrap: bootstrap.unwrap(),
-                    });
+                    return Ok(Some(result));
                 }
                 let code = result
                     .get("code")

@@ -26,11 +26,42 @@ import time
 import unicodedata
 import queue
 from urllib.parse import parse_qs, urlsplit
+import urllib.request
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ProbeError(Exception):
     pass
+
+
+def system_proxy_environment():
+    """Bridge enabled macOS HTTP proxies to CLI clients, without changing OS state.
+
+    Read SystemConfiguration directly: getproxies() may prefer an unrelated
+    environment NO_PROXY over the actual macOS settings. PAC is not evaluated.
+    """
+    if sys.platform != 'darwin':
+        return {}
+    try:
+        proxies = urllib.request.getproxies_macosx_sysconf()
+    except (AttributeError, OSError):
+        return {}
+    result = {}
+    for scheme in ('http', 'https'):
+        value = proxies.get(scheme)
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = urlsplit(value)
+            valid = (parsed.scheme in ('http', 'https') and parsed.hostname
+                     and parsed.port and not parsed.username and not parsed.password
+                     and not parsed.query and not parsed.fragment
+                     and parsed.path in ('', '/'))
+        except ValueError:
+            continue
+        if valid:
+            result[scheme.upper() + '_PROXY'] = value
+    return result
 
 
 def environment(config, workspace):
@@ -46,6 +77,12 @@ def environment(config, workspace):
         allowed.update({'DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR',
                         'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY'})
     env = {k: v for k, v in os.environ.items() if k in allowed}
+    # Finder-launched apps do not inherit shell proxy exports, and the official
+    # CLI does not necessarily honor macOS system proxy settings itself. Keep
+    # explicit caller routing (including ALL_PROXY) authoritative when present.
+    if not any(env.get(k) for k in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY',
+                                    'http_proxy', 'https_proxy', 'all_proxy')):
+        env.update(system_proxy_environment())
     # The broad nonessential-traffic switch also blocks /api/oauth/usage in
     # current official CLI versions. Disable telemetry/reporting individually.
     env.update(CLAUDE_CONFIG_DIR=str(config), PWD=str(workspace),

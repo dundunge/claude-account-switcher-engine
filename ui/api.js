@@ -17,6 +17,7 @@ const on = (event, cb) => {
 window.api = {
   list: () => invoke('accounts_list'),
   status: () => invoke('accounts_status'),
+  syncSessions: () => invoke('accounts_sync'),
   adopt: picked => invoke('accounts_adopt', { picked }),
   add: name => invoke('accounts_add', { name }),
   update: (id, fields) => invoke('accounts_update', { id, ...fields }),
@@ -59,6 +60,7 @@ window.api = {
   updateInstall: () => invoke('update_install'),
   onAccountsChanged: cb => on('accounts:changed', () => cb()),
   onLaunchStage: cb => on('account:launch-stage', cb),
+  onSyncStage: cb => on('sync:stage', cb),
   onHealthUpdate: cb => on('health:update', cb),
   onShowHealth: cb => on('health:show', () => cb()),
   onNewAccount: cb => on('account:new', () => cb()),

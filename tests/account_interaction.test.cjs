@@ -78,15 +78,19 @@ test('home Refresh usage runs the bulk query directly without opening a second p
   Object.assign(h.scope, {
     S: { view: 'list', accounts: h.accounts },
     quota: { busy: false, refreshingAll: false, refreshAll: () => h.calls.push(['query-all']) },
+    syncing: false, launching: false, syncSessions: () => h.calls.push(['sync']),
     $lead: { replaceChildren () {} }, $tools: { replaceChildren: (...children) => rendered.push(...children) },
     healthChip: () => null
   })
   h.run(launcher.slice(launcher.indexOf('function renderBar ('), launcher.indexOf('function healthChip (')))
   h.run('renderBar()')
+  const syncButton = rendered.find(node => node?.tag === 'button' && text(node).includes('同步会话'))
+  assert.ok(syncButton)
+  await syncButton.props.onclick()
   const button = rendered.find(node => node?.tag === 'button' && text(node).includes('刷新全部'))
   assert.ok(button)
   await button.props.onclick()
-  assert.deepEqual(h.calls, [['query-all']])
+  assert.deepEqual(h.calls, [['sync'], ['query-all']])
 })
 
 test('Enter on Refresh, Switch, or other focused buttons is handled by the button instead of launching a selected account', () => {

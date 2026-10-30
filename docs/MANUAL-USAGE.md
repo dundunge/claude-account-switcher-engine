@@ -62,6 +62,11 @@ CLI 在各账号独立的空工作目录和 PTY 中运行，直接将 `/usage` �
 避免新版全屏终端的启动协商与布局变化影响采集。
 继承环境采用允许列表，排除 API keys、gateway
 端点、OAuth token、注入的 account UUID、`NODE_OPTIONS` 等认证/执行覆盖项。
+在 macOS 上，若 CASE 没有继承显式的 HTTP(S)/ALL_PROXY 环境变量，会读取当前已启用的
+系统 HTTP/HTTPS 代理并传给官方 CLI；不修改系统网络设置，不硬编码 Clash 端口。
+显式代理环境变量优先，已有 `NO_PROXY` 保留；不执行 PAC，也不读取代理认证凭据。
+因此关闭 Clash IPv6 后，使用系统代理的查询不会因 CLI 忽略系统设置而走原生 IPv6 直连。
+若只启用 TUN 而未开启系统 HTTP/HTTPS 代理，本机制不会凭空添加代理。
 禁用用户 hooks 和 Remote Control，严格排除用户 MCP 配置，允许工具列表为空。
 继续设置 `DISABLE_AUTOUPDATER=1`。使用 `DISABLE_TELEMETRY=1`、
 `DISABLE_ERROR_REPORTING=1`、`DO_NOT_TRACK=1` 分别关闭遥测与错误上报。

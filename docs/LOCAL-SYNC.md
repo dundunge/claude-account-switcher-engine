@@ -35,6 +35,12 @@ server session remains valid forever.
 4. Incomplete recovery, concurrent switches or unexpected profile changes block the launch and retain the snapshot code for recovery.
 5. On success CASE reports `launching` and opens the chosen official Claude profile.
 
+The account list also has a **同步会话 / Sync sessions** button. It runs the same
+validated transaction for all configured profiles, requests a normal Claude exit,
+and leaves Claude closed when the sync finishes; it does not select or launch an
+account. The result reports the index change count and keeps the usual snapshot
+for recovery if a write is interrupted.
+
 Do not use two account managers against the same profiles concurrently. Do not symlink Desktop's
 account-scoped index. Use the engine's CLI help and review its plan before any recovery or apply.
 An unfinished journal must be reviewed and recovered before another write.

@@ -80,6 +80,48 @@ else:
 '''
 
 
+class ProxyEnvironmentTests(unittest.TestCase):
+    def test_enabled_system_proxy_reaches_cli_without_shell_exports(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+                probe, 'system_proxy_environment', return_value={
+                    'HTTPS_PROXY': 'http://127.0.0.1:7897'}):
+            self.assertEqual(probe.environment(Path('/config'), Path('/work'))['HTTPS_PROXY'],
+                             'http://127.0.0.1:7897')
+
+    def test_explicit_proxy_wins_and_no_proxy_is_preserved(self):
+        for key in ('HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'):
+            with self.subTest(key=key), mock.patch.dict(os.environ, {
+                    key: 'http://127.0.0.1:9999', 'NO_PROXY': 'localhost'}, clear=True), mock.patch.object(
+                    probe, 'system_proxy_environment') as system:
+                env = probe.environment(Path('/config'), Path('/work'))
+                self.assertEqual(env[key], 'http://127.0.0.1:9999')
+                self.assertEqual(env['NO_PROXY'], 'localhost')
+                system.assert_not_called()
+
+    def test_macos_reads_only_valid_enabled_http_proxies(self):
+        with mock.patch.object(probe.sys, 'platform', 'darwin'), mock.patch.object(
+                probe.urllib.request, 'getproxies_macosx_sysconf', create=True,
+                return_value={'http': 'http://127.0.0.1:7897',
+                              'https': 'http://127.0.0.1:7897', 'socks': 'socks5://localhost:9'}):
+            self.assertEqual(probe.system_proxy_environment(), {
+                'HTTP_PROXY': 'http://127.0.0.1:7897', 'HTTPS_PROXY': 'http://127.0.0.1:7897'})
+        for value in (None, '', 'http://host:bad', 'http://user:password@host:80', 'file:///tmp/a'):
+            with self.subTest(value=value), mock.patch.object(probe.sys, 'platform', 'darwin'), mock.patch.object(
+                    probe.urllib.request, 'getproxies_macosx_sysconf', create=True,
+                    return_value={'https': value}):
+                self.assertEqual(probe.system_proxy_environment(), {})
+
+    def test_disabled_missing_and_non_macos_leave_environment_unchanged(self):
+        with mock.patch.object(probe.sys, 'platform', 'darwin'), mock.patch.object(
+                probe.urllib.request, 'getproxies_macosx_sysconf', create=True, return_value={}):
+            self.assertEqual(probe.system_proxy_environment(), {})
+        with mock.patch.object(probe.sys, 'platform', 'darwin'), mock.patch.object(
+                probe.urllib.request, 'getproxies_macosx_sysconf', create=True, side_effect=OSError):
+            self.assertEqual(probe.system_proxy_environment(), {})
+        with mock.patch.object(probe.sys, 'platform', 'linux'):
+            self.assertEqual(probe.system_proxy_environment(), {})
+
+
 class ParserTests(unittest.TestCase):
     def test_usage_evidence_accepts_split_official_markers_only(self):
         evidence = probe.UsageEvidence()
@@ -257,6 +299,9 @@ class ResetTests(unittest.TestCase):
 @unittest.skipIf(os.name == 'nt', 'Unix PTY/account fixtures; Windows transport has dedicated synthetic tests')
 class AccountTests(unittest.TestCase):
     def setUp(self):
+        proxy_patch = mock.patch.object(probe, 'system_proxy_environment', return_value={})
+        proxy_patch.start()
+        self.addCleanup(proxy_patch.stop)
         self.temp = tempfile.TemporaryDirectory(prefix='case-usage-offline-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()

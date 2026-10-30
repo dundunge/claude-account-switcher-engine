@@ -385,6 +385,43 @@ fn accounts_status() -> Vec<Status> {
     probe(&store::accounts().unwrap_or_default())
 }
 
+/// Sync all configured profile indexes without opening a different account.
+/// The selected target is only used to validate the CASE profile scope; the
+/// bridge merges every configured partition in one transaction.
+#[tauri::command(async)]
+fn accounts_sync(app: AppHandle) -> Value {
+    let Ok(_operation) = store::OPERATION_LOCK.try_lock() else {
+        return error(crate::locale::tr(
+            "另一个账号操作正在进行，请稍后重试。",
+            "Another account operation is in progress. Try again shortly.",
+        ));
+    };
+    let Some(target) = sorted(&store::accounts().unwrap_or_default())
+        .first()
+        .cloned()
+    else {
+        return error(crate::locale::tr(
+            "还没有可同步的账号。",
+            "There are no accounts to sync yet.",
+        ));
+    };
+    let stage_app = app.clone();
+    let mut stage = |name: &str| {
+        let _ = stage_app.emit("sync:stage", json!({ "stage": name }));
+    };
+    match local_sync::sync_now_with_stage(&target.dir, &mut stage) {
+        Ok(mut result) => {
+            result["ok"] = Value::Bool(true);
+            changed(&app);
+            result
+        }
+        Err(message) => {
+            stage("error");
+            error(message)
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct Picked {
     name: String,
@@ -1633,6 +1670,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             accounts_list,
             accounts_status,
+            accounts_sync,
             accounts_adopt,
             accounts_add,
             accounts_update,

@@ -10,6 +10,10 @@ This repository is maintained independently: source code, in-app update checks, 
 
 Date every feature, fix or documentation update using `YYYY-MM-DD`, newest first. Append changes made on the same day under that date.
 
+### 2026-10-30
+
+- Added a **Sync sessions** button to the main window. It validates and syncs every configured profile without switching accounts; Claude is asked to quit normally first, and no account is launched after the sync.
+
 ### 2026-10-28
 
 - Fixed macOS sync detection incorrectly treating Claude's `ShipIt` updater as an active Desktop client. Repeated updater restarts no longer interrupt index sync; Claude Desktop and its session helpers still block index writes.
